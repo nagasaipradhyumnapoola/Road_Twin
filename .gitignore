@@ -4,7 +4,9 @@ __pycache__/
 .venv-vision/
 .ipynb_checkpoints/
 
-# build output
+# build output -- anchored to the repo root ON PURPOSE.
+# An unanchored `build/` also matches core/build/, which silently excludes
+# core/build/netconvert.py, the most important module in the project.
 /dist/
 /build/
 *.spec

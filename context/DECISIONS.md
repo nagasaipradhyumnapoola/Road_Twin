@@ -67,10 +67,26 @@ fetch; all are cached. A saved project reopens and re-simulates fully offline.
 Say it this way — the earlier phrasing "no cloud dependency" was not true.
 
 ## ADR-011 — Runtime dependencies are deliberately minimal
-`fastapi uvicorn pydantic requests lxml numpy pillow` and nothing else in the
-frozen binary. **GDAL, Rasterio, GeoPandas, NetworkX and OSMnx are excluded**:
-they were never load-bearing here, and they are the hardest libraries to freeze
-with PyInstaller. OSMnx may be used in notebooks.
+`fastapi uvicorn pydantic requests lxml numpy pillow` plus **`pyproj`** and
+nothing else in the frozen binary. **GDAL, Rasterio, GeoPandas, NetworkX and
+OSMnx are excluded**: they were never load-bearing here, and they are the
+hardest libraries to freeze with PyInstaller. OSMnx may be used in notebooks.
+
+`pyproj` was added after `core/model/geometry.py` was written: converting SUMO
+network XY back to WGS84 is required for both the map overlays (Phase 4) and
+for projecting a road centerline into the tile mosaic to prompt SAM (Phase 7).
+It has a working PyInstaller hook and is not in the same class of packaging
+pain as GDAL. The module degrades to boundary interpolation without it, and
+reports which mode it is in rather than hiding the difference.
+
+## ADR-014 — Road geometry crosses the deterministic/vision boundary in WGS84
+A SUMO network stores projected metres offset by `netOffset`. Every consumer
+outside the simulator — MapLibre, GeoJSON artifacts, the tile mosaic — works in
+lon/lat. `core/model/geometry.NetGeo` is the single conversion point; nothing
+else re-implements it. The centerline used to prompt SAM comes from the
+**median lane** of an edge, because that is guaranteed to lie on the road
+surface, and is densified so a straight edge yields prompts along its whole
+length rather than two endpoints.
 
 ## ADR-012 — No 3D view in the five-day build
 A rushed three.js scene looks worse than a good 2D map and costs four times as

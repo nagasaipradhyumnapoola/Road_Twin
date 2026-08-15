@@ -397,6 +397,101 @@ def test_scenario():
 
 
 # ===========================================================================
+GEONET = """<?xml version="1.0" encoding="UTF-8"?>
+<net>
+ <location netOffset="-368000.00,-1418000.00"
+           convBoundary="0.00,0.00,1000.00,800.00"
+           origBoundary="80.0398,12.8194,80.0487,12.8268"
+           projParameter="+proj=utm +zone=44 +ellps=WGS84 +datum=WGS84 +units=m +no_defs"/>
+ <edge id=":n2_0" function="internal">
+   <lane id=":n2_0_0" index="0" length="5.00" speed="13.89" shape="10,10 12,12"/>
+ </edge>
+ <edge id="E1" from="n1" to="n2" priority="10">
+   <lane id="E1_0" index="0" length="340.50" speed="16.67" shape="0.00,0.00 1000.00,800.00"/>
+   <lane id="E1_1" index="1" length="340.50" speed="16.67" shape="0.00,3.20 1000.00,803.20"/>
+   <lane id="E1_2" index="2" length="340.50" speed="16.67" shape="0.00,6.40 1000.00,806.40"/>
+ </edge>
+ <junction id="n1" type="priority" x="0.00" y="0.00"/>
+ <junction id="n2" type="traffic_light" x="1000.00" y="800.00"/>
+ <junction id=":n2_0" type="internal" x="500.00" y="400.00"/>
+</net>
+"""
+
+
+def test_geometry():
+    section("core/model/geometry.py  -- network XY <-> WGS84")
+    import warnings
+
+    from core.model.geometry import (NetGeo, densify_lonlat, edge_centerline_lonlat,
+                                     edges_to_geojson, junctions_to_geojson,
+                                     read_edge_shapes)
+
+    with tempfile.TemporaryDirectory() as td:
+        net = Path(td) / "n.net.xml"
+        net.write_text(GEONET)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            geo = NetGeo(net)
+        print(f"  ..   mode: {'exact (pyproj)' if geo.exact else 'boundary interpolation'}")
+
+        lon, lat = geo.xy_to_lonlat(0.0, 0.0)
+        check("SW corner maps to origBoundary SW",
+              abs(lon - 80.0398) < 2e-4 and abs(lat - 12.8194) < 2e-4,
+              f"{lon:.5f},{lat:.5f}")
+        lon, lat = geo.xy_to_lonlat(1000.0, 800.0)
+        check("NE corner maps to origBoundary NE",
+              abs(lon - 80.0487) < 2e-4 and abs(lat - 12.8268) < 2e-4,
+              f"{lon:.5f},{lat:.5f}")
+
+        worst = 0.0
+        for x, y in [(0, 0), (250, 200), (500, 400), (1000, 800), (137, 613)]:
+            lo, la = geo.xy_to_lonlat(x, y)
+            bx, by = geo.lonlat_to_xy(lo, la)
+            worst = max(worst, math.hypot(bx - x, by - y))
+        check("xy -> lonlat -> xy round-trip < 1 cm", worst < 0.01, f"worst {worst:.2e} m")
+
+        sh = read_edge_shapes(net)
+        check("internal edges excluded from shapes", ":n2_0" not in sh)
+        check("median lane used as the centerline (lies ON the road)",
+              sh["E1"][0][1] == 3.20, f"y0={sh['E1'][0][1]}")
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            line = edge_centerline_lonlat(net, "E1", geo=geo)
+            dense = densify_lonlat(line, every_m=10.0)
+            gj = edges_to_geojson(net)
+            jj = junctions_to_geojson(net)
+
+        check("centerline returned in lon/lat",
+              len(line) == 2 and 80.0 < line[0][0] < 80.1, str(line[0]))
+        # netconvert collapses straight runs to 2 points; SAM needs coverage
+        check("densify produces prompts along the whole road", len(dense) > 100,
+              f"{len(dense)} pts from {len(line)}")
+        lo, la = dense[len(dense) // 2]
+        check("densified midpoint stays inside the AOI",
+              80.039 < lo < 80.049 and 12.819 < la < 12.827, f"{lo:.5f},{la:.5f}")
+        check("max_points subsamples",
+              len(edge_centerline_lonlat(net, "E1", geo=geo, max_points=2)) == 2)
+
+        check("edges GeoJSON is a LineString collection",
+              len(gj["features"]) == 1
+              and gj["features"][0]["geometry"]["type"] == "LineString")
+        check("GeoJSON declares its georeferencing mode", "_georeferencing" in gj,
+              gj["_georeferencing"])
+
+        ids = {f["properties"]["junction_id"] for f in jj["features"]}
+        check("junctions: internal and dead-end excluded", ids == {"n1", "n2"}, str(ids))
+        check("signalised junction flagged",
+              any(f["properties"]["has_signal"] for f in jj["features"]))
+
+        try:
+            edge_centerline_lonlat(net, "NOPE", geo=geo)
+            check("unknown edge raises", False, "no exception")
+        except KeyError:
+            check("unknown edge raises", True)
+
+
 def test_export():
     section("core/export/package.py  -- the deliverable")
     from core.export.package import export_project, write_readme
@@ -435,6 +530,7 @@ def main() -> int:
     test_metrics()
     test_edits()
     test_scenario()
+    test_geometry()
     test_export()
     print("\n" + "=" * 72)
     print(f"{PASS} passed, {FAIL} failed")

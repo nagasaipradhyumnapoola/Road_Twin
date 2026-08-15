@@ -16,6 +16,12 @@ lxml>=5.2
 numpy>=1.26
 pillow>=10.3
 
+# Exact SUMO-XY <-> WGS84 conversion in core/model/geometry.py. Optional: the
+# module falls back to boundary interpolation (sub-metre over a 500 m AOI) and
+# tells you which mode it is in. Install it -- pyproj has a working PyInstaller
+# hook and is not in the same class of packaging pain as GDAL/GeoPandas.
+pyproj>=3.6
+
 # dev only -- not frozen
 pyinstaller>=6.6
 pytest>=8.2
