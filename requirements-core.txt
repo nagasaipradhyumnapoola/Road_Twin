@@ -1,0 +1,28 @@
+# CORE SIDECAR — frozen into the Windows installer with PyInstaller.
+#
+# ADR-011: this list is deliberately minimal and CLOSED.
+# Do NOT add geopandas, gdal, rasterio, networkx or osmnx. They were never
+# load-bearing in this design, and they are the hardest libraries to freeze.
+# Adding one of them is how a 300 MB installer becomes a 3 GB one that fails
+# to build on Day 5.
+#
+# torch / transformers belong to requirements-vision.txt only (ADR-007).
+
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pydantic>=2.7
+requests>=2.32
+lxml>=5.2
+numpy>=1.26
+pillow>=10.3
+
+# Exact SUMO-XY <-> WGS84 conversion in core/model/geometry.py. Optional: the
+# module falls back to boundary interpolation (sub-metre over a 500 m AOI) and
+# tells you which mode it is in. Install it -- pyproj has a working PyInstaller
+# hook and is not in the same class of packaging pain as GDAL/GeoPandas.
+pyproj>=3.6
+
+# dev only -- not frozen
+pyinstaller>=6.6
+pytest>=8.2
+ruff>=0.4

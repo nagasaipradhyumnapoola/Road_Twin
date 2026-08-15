@@ -1,0 +1,31 @@
+# VISION SIDECAR — separate venv, NOT frozen into the installer (ADR-007).
+#
+# Use Hugging Face transformers for BOTH models.
+#
+# Do NOT install from the upstream repos:
+#   - IDEA-Research/GroundingDINO  compiles a custom CUDA op
+#     (MultiScaleDeformableAttention) at install time and fails on Windows
+#     without MSVC + a matching CUDA toolkit
+#   - facebookresearch/segment-anything-2  has similar build friction
+#
+# The transformers ports are pure PyTorch: pip install, import, done. They also
+# run on CPU, which is the fallback when the demo machine has no GPU.
+#
+# For CUDA, install torch first from the PyTorch index for your CUDA version:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu124
+
+torch>=2.3
+transformers>=4.57          # Sam2Model / Sam2Processor landed here
+accelerate>=0.30
+pillow>=10.3
+numpy>=1.26
+requests>=2.32
+fastapi>=0.115
+uvicorn[standard]>=0.30
+
+# notebooks
+jupyterlab>=4.2
+matplotlib>=3.8
+
+# optional, notebooks only -- keep it OUT of the core sidecar
+# osmnx>=2.1
