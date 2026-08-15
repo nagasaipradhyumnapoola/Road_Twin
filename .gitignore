@@ -5,8 +5,8 @@ __pycache__/
 .ipynb_checkpoints/
 
 # build output
-dist/
-build/
+/dist/
+/build/
 *.spec
 apps/desktop/node_modules/
 apps/desktop/src-tauri/target/
