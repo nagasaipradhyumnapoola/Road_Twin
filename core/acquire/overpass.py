@@ -40,6 +40,41 @@ def _cache_key(bbox: tuple[float, float, float, float]) -> str:
     return hashlib.sha256(("%.6f,%.6f,%.6f,%.6f" % bbox).encode()).hexdigest()[:16]
 
 
+# Public Overpass mirrors tried in order when the primary is rate-limited.
+_MIRRORS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://lz4.overpass-api.de/api/interpreter",   # CDN mirror — often succeeds when primary 504s
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+]
+
+
+def _try_mirrors(query: str, primary: str, user_agent: str, timeout_s: int) -> bytes:
+    """POST to primary; on 4xx/timeout fall through mirrors in order."""
+    candidates = [primary] + [m for m in _MIRRORS if m != primary]
+    last_err: Exception | None = None
+    for url in candidates:
+        try:
+            resp = requests.post(
+                url,
+                data={"data": query},
+                headers={"User-Agent": user_agent},
+                timeout=timeout_s + 30,
+            )
+            if resp.status_code == 200 and b"<osm" in resp.content[:2000]:
+                print(f"[overpass] success via {url}")
+                return resp.content
+            print(f"[overpass] {url} => {resp.status_code}, trying next mirror")
+            last_err = Exception(f"HTTP {resp.status_code}")
+        except Exception as exc:
+            print(f"[overpass] {url} error: {exc}, trying next mirror")
+            last_err = exc
+    raise RuntimeError(
+        f"All Overpass mirrors failed. Last error: {last_err}\n"
+        "Commit a cached .osm file or try again later."
+    )
+
+
 def fetch_osm(
     bbox: tuple[float, float, float, float],
     out_path: str | Path,
@@ -77,19 +112,11 @@ def fetch_osm(
         timeout=timeout_s, south=south, west=west, north=north, east=east
     )
     print(f"[overpass] querying bbox=({south:.5f},{west:.5f},{north:.5f},{east:.5f})")
-    resp = requests.post(
-        endpoint,
-        data={"data": query},
-        headers={"User-Agent": user_agent},
-        timeout=timeout_s + 30,
-    )
-    resp.raise_for_status()
-    if b"<osm" not in resp.content[:2000]:
-        raise RuntimeError(f"Overpass did not return OSM XML: {resp.text[:300]}")
+    content = _try_mirrors(query, endpoint, user_agent, timeout_s)
 
-    out_path.write_bytes(resp.content)
+    out_path.write_bytes(content)
     if cached:
         cached.parent.mkdir(parents=True, exist_ok=True)
-        cached.write_bytes(resp.content)
+        cached.write_bytes(content)
     print(f"[overpass] wrote {out_path} ({out_path.stat().st_size/1024:.0f} KB)")
     return out_path

@@ -56,6 +56,14 @@ def c_sumo_home():
     import os
     h = os.environ.get("SUMO_HOME")
     if not h:
+        for standard_path in (
+            "C:/Program Files (x86)/Eclipse/Sumo",
+            "C:/Program Files/Eclipse/Sumo",
+        ):
+            if Path(standard_path).exists():
+                h = standard_path
+                break
+    if not h:
         return BAD, "SUMO_HOME not set. See SETUP.md."
     if not Path(h).exists():
         return BAD, f"SUMO_HOME points at a missing path: {h}"
@@ -67,10 +75,14 @@ def _ver(binary: str):
     if not exe:
         import os
         h = os.environ.get("SUMO_HOME", "")
-        for cand in (Path(h) / "bin" / binary, Path(h) / "bin" / f"{binary}.exe"):
-            if cand.exists():
-                exe = str(cand)
-                break
+        for base in [h, "C:/Program Files (x86)/Eclipse/Sumo", "C:/Program Files/Eclipse/Sumo"]:
+            if base:
+                for cand in (Path(base) / "bin" / binary, Path(base) / "bin" / f"{binary}.exe"):
+                    if cand.exists():
+                        exe = str(cand)
+                        break
+                if exe:
+                    break
     if not exe:
         return BAD, f"{binary} not found on PATH or in SUMO_HOME/bin"
     out = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=20)
@@ -135,7 +147,13 @@ def c_node():
 
 
 def c_rust():
+    import os
     exe = shutil.which("cargo")
+    if not exe:
+        for cand in [Path(os.path.expanduser("~")) / ".cargo/bin/cargo.exe", Path("C:/Users/yashk/.cargo/bin/cargo.exe")]:
+            if cand.exists():
+                exe = str(cand)
+                break
     if not exe:
         return WARN, "cargo not found (needed to build the Tauri shell)"
     out = subprocess.run([exe, "--version"], capture_output=True, text=True)

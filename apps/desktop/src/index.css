@@ -1,0 +1,2 @@
+/* global reset — App.css owns everything else */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }

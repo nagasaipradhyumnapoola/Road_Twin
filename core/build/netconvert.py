@@ -30,6 +30,14 @@ def sumo_home() -> Path:
     env = os.environ.get("SUMO_HOME")
     if env and Path(env).exists():
         return Path(env)
+    # fall back to standard Windows install locations
+    for standard_path in (
+        Path("C:/Program Files (x86)/Eclipse/Sumo"),
+        Path("C:/Program Files/Eclipse/Sumo"),
+        Path(os.path.expanduser("~")) / "AppData/Local/Programs/Eclipse/Sumo",
+    ):
+        if standard_path.exists():
+            return standard_path
     # fall back to inferring from a binary on PATH
     exe = shutil.which("netconvert")
     if exe:

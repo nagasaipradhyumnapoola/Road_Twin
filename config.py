@@ -79,7 +79,7 @@ VISION = {
 # OVERPASS
 # ---------------------------------------------------------------------------
 OVERPASS = {
-    "endpoint": "https://overpass-api.de/api/interpreter",
+    "endpoint": "https://lz4.overpass-api.de/api/interpreter",
     "user_agent": "RoadTwin/0.1 (SIH95; contact: you@example.com)",
     "timeout_s": 90,
 }
