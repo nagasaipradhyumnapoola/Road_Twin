@@ -4,9 +4,9 @@
 > It is the handoff note to your next session and the only place that records
 > what is actually true right now.
 
-**Last updated:** 2026-08-16T01:20 IST  
+**Last updated:** 2026-08-16T10:16 IST  
 **Build version:** 0.1.0  
-**Active phase:** P1 — SHIPPING PATH (COMPLETED)
+**Active phase:** P6 — THE EXPERIMENT (COMPLETED)
 
 ---
 
@@ -16,9 +16,9 @@
 Command:      python scripts/selftest.py
 Result:       78/78 passed  0 failed
 Verify Env:   10 ok, 2 warn (python 3.14 + optional torch), 0 fail
-Installer:    RoadTwin_0.1.0_x64-setup.exe + RoadTwin_0.1.0_x64_en-US.msi
-Installed:    C:\Users\yashk\AppData\Local\RoadTwin\app.exe launches & /health responds
-Headless:     python scripts/run_benchmark.py -> RoadTwin_Project_benchmark.zip (2.5MB)
+OpenDRIVE:    verify_xodr_roundtrip PASS
+Pipeline:     python scripts/run_benchmark.py -> RoadTwin_Project_benchmark.zip (3.0MB)
+Desktop:      Vite TS clean build (1167 KB bundle, 0 errors)
 Benchmark:    GST Road, Chennai  lat=12.8231 lon=80.0442 aoi=500m
 ```
 
@@ -46,10 +46,14 @@ Benchmark:    GST Road, Chennai  lat=12.8231 lon=80.0442 aoi=500m
 - [x] Day 1 — Tauri built both `.msi` and `.exe` installers
 - [x] Day 1 — **Installed application launched from `AppData\Local\RoadTwin\app.exe` and verified live `/health` HTTP 200**
 - [x] Day 1 — `scripts/run_benchmark.py` headless spine executed end-to-end: Overpass -> Netconvert -> Plain XML -> Netconvert -> XODR roundtrip PASS -> randomTrips -> 5 seeds baseline vs closure SUMO simulation -> `RoadTwin_Project_benchmark.zip` (2.5 MB)
+- [x] Day 2 — Phase 3: Location Gateway UI (`LocationGateway.tsx`) with MapLibre GL map, Nominatim address search, draggable marker, AOI circle, manual coordinates, external map link via `tauri-plugin-opener`, backend location confirmation gate.
+- [x] Day 2 — Phase 4: Canonical RoadTwin Pydantic model (`core/model/roadtwin.py`), `core/model/builder.py` converting net.xml to canonical model + GeoJSON layers (`roads.geojson`, `junctions.geojson`) with full lane provenance tracking.
+- [x] Day 3 — Phase 5: OpenDRIVE export roundtrip verification (`PASS`), demand generation and calibration tooling.
+- [x] Day 3 — Phase 6: Full lane-closure experiment (`ExperimentWorkspace.tsx`), road/lane selection, seed variation, comparison table with delta percentage and significance determination, project ZIP export endpoint (`POST /export/zip`).
 
 ## IN PROGRESS
 
-- Ready for Phase 2 / Phase 3
+- P7: Visual Evidence (SAM road segmentation, georeferenced mosaic) — Optional Upside
 
 ## BROKEN
 
@@ -57,7 +61,7 @@ Benchmark:    GST Road, Chennai  lat=12.8231 lon=80.0442 aoi=500m
 
 ## NEXT
 
-- Phase 2: Location Gateway UI (MapLibre + marker drag + confirm AOI)
+- Phase 7: Visual Evidence (satellite XYZ tiles mosaic georeferencer + SAM centerline prompt)
 - Push Phase 1 to branch `phase/1-shipping`
 
 ---

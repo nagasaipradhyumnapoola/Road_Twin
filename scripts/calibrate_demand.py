@@ -133,18 +133,19 @@ def main() -> int:
     print(f"Edge: {edge_id}  lanes={edges[edge_id]['num_lanes']}  "
           f"len={edges[edge_id]['length_m']:.0f}m  closing lane {lane_index}\n")
 
-    periods = sorted(float(p) for p in args.periods.split(","))
+    periods = sorted([float(p) for p in args.periods.split(",")], reverse=True)
     best = None
 
     print(f"{'PERIOD':>8}  {'VEHICLES':>9}  {'BASE_TT':>9}  {'CLOS_TT':>9}  "
-          f"{'DELTA%':>8}  {'TELEPORTS':>10}  STATUS")
-    print("-" * 80)
+          f"{'DELTA%':>8}  {'TELEPORTS':>10}  STATUS", flush=True)
+    print("-" * 80, flush=True)
 
     for period in periods:
         try:
+            print(f"Testing period {period:.2f}...", end="\r", flush=True)
             r = calibrate_period(net_file, edge_id, lane_index, period, seed=args.seed)
         except Exception as exc:
-            print(f"{period:8.2f}  ERROR: {exc}")
+            print(f"{period:8.2f}  ERROR: {exc}", flush=True)
             continue
 
         base = f"{r['base_tt_s']:.1f}s" if r['base_tt_s'] else "N/A"
@@ -162,7 +163,7 @@ def main() -> int:
         status = "✓ CALIBRATED" if good else ("TELEPORT" if r['has_teleports'] else "...")
 
         print(f"{period:8.2f}  {r['veh_count']:9d}  {base:>9}  {clos:>9}  "
-              f"{delta:>8}  {tele:>10}  {status}")
+              f"{delta:>8}  {tele:>10}  {status}", flush=True)
 
         if good and best is None:
             best = r
