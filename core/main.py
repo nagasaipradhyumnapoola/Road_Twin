@@ -491,7 +491,7 @@ def run_experiment_endpoint(body: ExperimentRequest) -> dict:
 @app.get("/vision/status")
 def vision_status() -> dict:
     """Check if vision environment and model weights are ready."""
-    vision_python = C.ROOT / ".venv-vision" / "Scripts" / "python.exe"
+    vision_python = _base / ".venv-vision" / "Scripts" / "python.exe"
     has_venv = vision_python.exists()
     return {
         "available": has_venv,
@@ -506,18 +506,18 @@ def vision_run(edge_id: str | None = None, zoom: int = 18) -> dict:
     _require_location()
     proj = _project_dir()
 
-    vision_python = C.ROOT / ".venv-vision" / "Scripts" / "python.exe"
+    vision_python = _base / ".venv-vision" / "Scripts" / "python.exe"
     if not vision_python.exists():
         raise HTTPException(status_code=503,
                             detail="Vision environment not configured (.venv-vision missing).")
 
     import subprocess
-    cmd = [str(vision_python), str(C.ROOT / "scripts" / "run_vision.py"),
+    cmd = [str(vision_python), str(_base / "scripts" / "run_vision.py"),
            "--project", proj.name, "--zoom", str(zoom)]
     if edge_id:
         cmd.extend(["--edge", edge_id])
 
-    res = subprocess.run(cmd, capture_output=True, text=True, cwd=str(C.ROOT))
+    res = subprocess.run(cmd, capture_output=True, text=True, cwd=str(_base))
     if res.returncode != 0:
         raise HTTPException(status_code=500, detail=f"Vision extraction failed: {res.stderr or res.stdout}")
 
@@ -567,6 +567,14 @@ def review_queue() -> dict:
 
     obs_file = proj / "observations.json"
     if not obs_file.exists():
+        bench_obs = proj.parent / "benchmark" / "observations.json"
+        asset_obs = _base / "assets" / "benchmark" / "observations.json"
+        if bench_obs.exists():
+            obs_file = bench_obs
+        elif asset_obs.exists():
+            obs_file = asset_obs
+
+    if not obs_file.exists():
         return {"items": [], "total": 0, "review_count": 0, "agreement_count": 0}
 
     observations = json.loads(obs_file.read_text(encoding="utf-8"))
@@ -577,6 +585,10 @@ def review_queue() -> dict:
     plain_edg = proj / "build" / "plain.edg.xml"
     if not plain_edg.exists():
         plain_edg = proj / "plain.edg.xml"
+    if not plain_edg.exists():
+        bench_edg = proj.parent / "benchmark" / "build" / "plain.edg.xml"
+        if bench_edg.exists():
+            plain_edg = bench_edg
 
     baseline_dict: dict[str, dict] = {}
     if plain_edg.exists():
@@ -613,10 +625,18 @@ def review_decision(req: ReviewDecisionRequest) -> dict:
     """Apply human validation decision: accept/reject/edit observation -> recompile & re-simulate."""
     _require_location()
     proj = _project_dir()
+    import shutil
 
     obs_file = proj / "observations.json"
     if not obs_file.exists():
-        raise HTTPException(status_code=404, detail="observations.json not found.")
+        bench_obs = proj.parent / "benchmark" / "observations.json"
+        asset_obs = _base / "assets" / "benchmark" / "observations.json"
+        if bench_obs.exists():
+            shutil.copy(bench_obs, obs_file)
+        elif asset_obs.exists():
+            shutil.copy(asset_obs, obs_file)
+        else:
+            raise HTTPException(status_code=404, detail="observations.json not found.")
 
     observations = json.loads(obs_file.read_text(encoding="utf-8"))
     target_obs = next((o for o in observations if o["id"] == req.observation_id), None)
@@ -630,10 +650,18 @@ def review_decision(req: ReviewDecisionRequest) -> dict:
     if not plain_edg.exists():
         plain_edg = proj / "plain.edg.xml"
     if not plain_edg.exists():
-        raise HTTPException(status_code=500, detail="plain.edg.xml not found for editing.")
+        bench_edg = proj.parent / "benchmark" / "build" / "plain.edg.xml"
+        if bench_edg.exists():
+            (proj / "build").mkdir(parents=True, exist_ok=True)
+            shutil.copy(bench_edg, proj / "build" / "plain.edg.xml")
+            plain_edg = proj / "build" / "plain.edg.xml"
+            if (proj.parent / "benchmark" / "build" / "plain.nod.xml").exists():
+                shutil.copy(proj.parent / "benchmark" / "build" / "plain.nod.xml", proj / "build" / "plain.nod.xml")
+        else:
+            raise HTTPException(status_code=500, detail="plain.edg.xml not found for editing.")
 
     from core.model.edits import Edit, apply_edits, write_validation_report
-    from core.acquire.netconvert import plain_to_net
+    from core.build.netconvert import plain_to_net
 
     report_path = proj / "validation_report.json"
     existing_decisions = []
@@ -751,11 +779,22 @@ def review_replay() -> dict:
     report_path = proj / "validation_report.json"
     plain_edg = proj / "build" / "plain.edg.xml"
 
+    if not report_path.exists():
+        bench_rep = proj.parent / "benchmark" / "validation_report.json"
+        if bench_rep.exists():
+            report_path = bench_rep
+
+    if not plain_edg.exists():
+        bench_edg = proj.parent / "benchmark" / "build" / "plain.edg.xml"
+        if bench_edg.exists():
+            plain_edg = bench_edg
+
     if not report_path.exists() or not plain_edg.exists():
         raise HTTPException(status_code=404, detail="validation_report.json or baseline plain.edg.xml missing.")
 
     from core.model.edits import replay
     test_out = proj / "build" / "replayed.edg.xml"
+    (proj / "build").mkdir(parents=True, exist_ok=True)
     replay(plain_edg, report_path, test_out)
 
     return {
