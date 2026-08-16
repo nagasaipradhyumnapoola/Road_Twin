@@ -1,35 +1,46 @@
-# SETUP — Day 0 environment
+# SETUP — Team Installation & Reproduction Guide
 
-Every failure here costs minutes now and hours later. Do it the evening before
-Day 1.
+Complete step-by-step setup guide. Every dependency, toolchain, and command used across Phases 0 through 9 is documented here so any team member on a fresh Windows 10/11 machine can reproduce the build.
 
 ---
 
-## 1. Python 3.11 or 3.12
+## 1. Automated Toolchain Installation (Winget)
 
-Not 3.13 — wheel coverage for some dependencies is still patchy.
+Run in an Administrator PowerShell prompt:
 
 ```powershell
-python --version
-python -m venv .venv
-.venv\Scripts\activate
-pip install --upgrade pip
-pip install -r requirements-core.txt
+# 1. SUMO Traffic Simulation Suite
+winget install Eclipse.SUMO --accept-source-agreements --accept-package-agreements
+
+# 2. Rust & Cargo Toolchain
+winget install Rustlang.Rustup --accept-source-agreements --accept-package-agreements
+
+# 3. Node.js 20+ LTS
+winget install OpenJS.NodeJS.LTS --accept-source-agreements --accept-package-agreements
+
+# 4. Microsoft Visual C++ 2022 Build Tools (Required for Tauri native compilation)
+winget install Microsoft.VisualStudio.2022.BuildTools --accept-source-agreements --accept-package-agreements --override "--passive --config vs.config --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
 ```
 
-## 2. SUMO — the one prerequisite you cannot skip
+---
 
-Download the Windows installer from
-<https://sumo.dlr.de/docs/Downloads.php> and install it.
+## 2. Environment Variables Configuration
 
-Then set `SUMO_HOME` **permanently**:
+Set `SUMO_HOME` and update system `PATH` permanently:
 
 ```powershell
+# Set SUMO_HOME
 setx SUMO_HOME "C:\Program Files (x86)\Eclipse\Sumo"
+
+# Add SUMO bin and tools to PATH (User level)
+$oldPath = [Environment]::GetEnvironmentVariable("Path", "User")
+$sumoBin = "C:\Program Files (x86)\Eclipse\Sumo\bin"
+if ($oldPath -notlike "*$sumoBin*") {
+    [Environment]::SetEnvironmentVariable("Path", "$oldPath;$sumoBin", "User")
+}
 ```
 
-**Open a new terminal** (setx does not affect the current one) and verify:
-
+**Restart your PowerShell terminal** and verify:
 ```powershell
 echo $env:SUMO_HOME
 netconvert --version
@@ -37,106 +48,110 @@ sumo --version
 python "$env:SUMO_HOME\tools\randomTrips.py" --help
 ```
 
-All four must work. If `netconvert` is not found, add `%SUMO_HOME%\bin` to PATH.
+---
 
-Confirm the OSM typemap exists — without it netconvert applies weak lane and
-speed defaults to Indian road classes and your baseline is junk:
+## 3. Python Virtual Environments Setup
 
-```powershell
-dir "$env:SUMO_HOME\data\typemap\osmNetconvert.typ.xml"
-```
+We use **two isolated virtual environments** (ADR-007):
 
-## 3. Node.js 20 LTS
+### A. Core Engine Environment (`.venv`)
+Contains FastAPI, netconvert wrappers, simulation, and export utilities. Kept lightweight (~30 MB) for PyInstaller bundling:
 
 ```powershell
-node --version
-npm --version
+python -m venv .venv
+.venv\Scripts\activate
+python -m pip install --upgrade pip
+pip install -r requirements-core.txt
+pip install pyinstaller
 ```
 
-## 4. Rust
-
-```powershell
-# https://rustup.rs
-rustup default stable
-cargo --version
-```
-
-## 5. Tauri prerequisites (Windows)
-
-- **Microsoft C++ Build Tools 2022** — install the "Desktop development with
-  C++" workload
-- **WebView2 Runtime** — usually already present on Windows 11
-
-```powershell
-npm create tauri-app@latest
-```
-
-## 6. Vision environment — SEPARATE venv (ADR-007)
-
-Keep `torch` out of the frozen core binary. This is what keeps the installer at
-~300 MB instead of 3–5 GB.
+### B. Vision AI Environment (`.venv-vision`)
+Contains PyTorch, torchvision, HuggingFace transformers for SAM 2.1 zero-shot segmentation:
 
 ```powershell
 python -m venv .venv-vision
 .venv-vision\Scripts\activate
+python -m pip install --upgrade pip
 pip install -r requirements-vision.txt
-python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
 ```
-
-For a CUDA build, install torch from the PyTorch index for your CUDA version
-before installing the rest.
-
-Pre-download the model weights on the demo machine so the first run at the
-venue is not a 900 MB download:
-
-```python
-from transformers import Sam2Model, Sam2Processor, AutoProcessor, AutoModelForZeroShotObjectDetection
-Sam2Model.from_pretrained("facebook/sam2.1-hiera-small")
-Sam2Processor.from_pretrained("facebook/sam2.1-hiera-small")
-AutoProcessor.from_pretrained("IDEA-Research/grounding-dino-tiny")
-AutoModelForZeroShotObjectDetection.from_pretrained("IDEA-Research/grounding-dino-tiny")
-```
-
-## 7. Tile provider
-
-MapLibre ships no map data. Pick a provider whose terms permit your use, and
-set the URL from the environment — never commit a key.
-
-```powershell
-$env:ROADTWIN_TILE_URL = "https://.../{z}/{x}/{y}.png"
-```
-
-Also update the `User-Agent` strings in `config.py` with a real contact address.
-
-## 8. Verify
-
-```powershell
-python scripts/verify_environment.py    # must show 0 FAIL
-python scripts/selftest.py              # must show 0 failed
-```
-
-## 9. PyInstaller (Day 1)
-
-```powershell
-pip install pyinstaller
-pyinstaller --onedir --name api --collect-all lxml core\main.py
-```
-
-If a frozen import fails, add `--hidden-import <module>`. Resolve this on Day 1,
-not Day 5.
 
 ---
 
-## Troubleshooting
+## 4. Frontend & Tauri Desktop Setup
 
-| Symptom | Cause | Fix |
+Install Node dependencies in `apps/desktop`:
+
+```powershell
+cd apps\desktop
+npm install
+npm run build
+cd ..\..
+```
+
+---
+
+## 5. Verification & Testing Commands
+
+Run all verification suites in order:
+
+```powershell
+# 1. Environment Health Check (checks SUMO, tools, cache)
+python scripts/verify_environment.py
+
+# 2. 78 Mathematical & Logic Unit Tests (No SUMO/network needed, ~2s)
+python scripts/selftest.py
+
+# 3. 14 API Endpoints & Replay Invariants Integration Test
+python scripts/test_all_endpoints.py
+
+# 4. Phase 8 Replay Audit Invariant Test
+python scripts/test_phase8.py
+
+# 5. Full Headless Benchmark Pipeline (Overpass -> netconvert -> SUMO simulation -> ZIP)
+python scripts/run_benchmark.py --seeds 1 --offline
+
+# 6. Vision Pipeline (Overhead Mosaic -> SAM 2.1 Segment -> Width Measurement)
+.venv-vision\Scripts\python scripts/run_vision.py
+```
+
+---
+
+## 6. Building Production Binary & Windows Installers
+
+### Step A: Build Single-File Sidecar Binary (`dist/api.exe`)
+```powershell
+.venv\Scripts\activate
+pyinstaller --clean -y api_onefile.spec
+Copy-Item -Force dist\api.exe apps\desktop\src-tauri\binaries\api-x86_64-pc-windows-msvc.exe
+```
+
+### Step B: Build Tauri Desktop Installer (.msi + .exe)
+```powershell
+cd apps\desktop
+npm run tauri build
+```
+
+Generated installer files:
+- MSI: `apps\desktop\src-tauri\target\release\bundle\msi\RoadTwin_0.1.0_x64_en-US.msi`
+- EXE: `apps\desktop\src-tauri\target\release\bundle\nsis\RoadTwin_0.1.0_x64-setup.exe`
+
+---
+
+## 7. Running Development Desktop App
+
+```powershell
+cd apps\desktop
+npm run tauri dev
+```
+
+---
+
+## 8. Troubleshooting Common Issues
+
+| Problem | Cause | Solution |
 |---|---|---|
-| `SUMO_HOME is not set` | `setx` needs a new shell | open a new terminal |
-| `netconvert not found` | not on PATH | add `%SUMO_HOME%\bin` |
-| netconvert produces an empty network | AOI has no drivable roads | widen `aoi_radius_m` or move the benchmark |
-| junctions disconnected in netedit | bad source data | change the benchmark location |
-| `shell.open is not a function` | Tauri v1 tutorial | use `tauri-plugin-opener` |
-| Grounding DINO install compiles CUDA ops | using the IDEA-Research repo | use `transformers` instead |
-| PyInstaller binary flagged by antivirus | unsigned heuristic | whitelist on the demo machine, days early |
-| Overpass 429 | rate limited | use the cached extract in `assets/benchmark/` |
-| Map is a grey rectangle | no tile source configured | set a style/tile URL |
+| `SUMO_HOME is not set` | Environment variable not refreshed | Restart terminal or run `$env:SUMO_HOME = "C:\Program Files (x86)\Eclipse\Sumo"` |
+| `netconvert not found` | SUMO bin directory not in PATH | Run `netconvert` via absolute path or add to PATH |
+| `opener:default capability missing` | Tauri 2 permissions mismatch | Verify `capabilities/default.json` contains `"opener:default"` in `permissions` |
+| `Overpass HTTP 429` | Public Overpass rate limit | Use `--offline` flag; cached extract in `assets/benchmark/` is used |
+| `SmartScreen Warning` | Unsigned binary heuristic | Click "More info" → "Run anyway" (expected for unsigned hackathon builds) |
