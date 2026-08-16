@@ -33,6 +33,7 @@ fn wait_for_health(port: u16, timeout_secs: u64) -> Result<(), String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_opener::init())
         .manage(Arc::new(Mutex::new(SidecarState::default())))
         .setup(|app| {
             let port: u16 = 8765;
