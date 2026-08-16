@@ -130,6 +130,31 @@ def _require_location() -> dict:
     return loc
 
 
+def _get_net_file() -> Path:
+    """Return path to network.net.xml with automatic benchmark fallback."""
+    proj = _project_dir()
+    p1 = proj / "sumo" / "network.net.xml"
+    if p1.exists():
+        return p1
+    p2 = proj / "build" / "network.net.xml"
+    if p2.exists():
+        return p2
+    # Check benchmark project
+    bench = proj.parent / "benchmark" / "sumo" / "network.net.xml"
+    if bench.exists():
+        import shutil
+        (proj / "sumo").mkdir(parents=True, exist_ok=True)
+        shutil.copy(bench, p1)
+        return p1
+    bench_build = proj.parent / "benchmark" / "build" / "network.net.xml"
+    if bench_build.exists():
+        import shutil
+        (proj / "build").mkdir(parents=True, exist_ok=True)
+        shutil.copy(bench_build, p2)
+        return p2
+    raise HTTPException(status_code=412, detail="Network not built. POST /model/build first.")
+
+
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 def _sumo_ok() -> tuple[bool, str | None]:
@@ -314,10 +339,7 @@ class ExperimentRequest(BaseModel):
 def list_edges() -> dict:
     """List drivable edges from the compiled network — drives the UI selectors."""
     _require_location()
-    proj = _project_dir()
-    net_file = proj / "sumo" / "network.net.xml"
-    if not net_file.exists():
-        raise HTTPException(status_code=412, detail="Network not built. POST /model/build first.")
+    net_file = _get_net_file()
 
     try:
         from core.sim.scenario import read_net_edges, pick_closure_candidate
@@ -351,9 +373,7 @@ def generate_demand(body: DemandRequest) -> dict:
     """Generate traffic demand (randomTrips). Required before running experiment."""
     _require_location()
     proj = _project_dir()
-    net_file = proj / "sumo" / "network.net.xml"
-    if not net_file.exists():
-        raise HTTPException(status_code=412, detail="Network not built. POST /model/build first.")
+    net_file = _get_net_file()
 
     routes_file = proj / "sumo" / "routes.rou.xml"
     if routes_file.exists() and not body.force:
@@ -387,9 +407,7 @@ def build_scenario(body: ScenarioRequest) -> dict:
     """Write the lane-closure additional-file. Validates edge + lane before writing."""
     _require_location()
     proj = _project_dir()
-    net_file = proj / "sumo" / "network.net.xml"
-    if not net_file.exists():
-        raise HTTPException(status_code=412, detail="Network not built. POST /model/build first.")
+    net_file = _get_net_file()
 
     try:
         from core.sim.scenario import build_lane_closure
