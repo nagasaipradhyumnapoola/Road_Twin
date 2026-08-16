@@ -283,6 +283,244 @@ def network_geojson() -> dict:
     return result
 
 
+
+# ── P6 experiment state (in-memory, single-project) ──────────────────────────
+# Stores the last experiment result so the UI can poll without re-running.
+_experiment_state: dict = {"status": "idle"}   # idle | running | done | error
+
+
+class DemandRequest(BaseModel):
+    period: float = 0.8
+    fringe_factor: float = 10.0
+    force: bool = False
+
+
+class ScenarioRequest(BaseModel):
+    edge_id: str
+    lane_index: int
+    begin: int = 300
+    end: int = 3600
+
+
+class ExperimentRequest(BaseModel):
+    edge_id: str
+    lane_index: int
+    seeds: list[int] | None = None   # None → use config defaults
+
+
+# ── P6 routes ─────────────────────────────────────────────────────────────────
+
+@app.get("/network/edges")
+def list_edges() -> dict:
+    """List drivable edges from the compiled network — drives the UI selectors."""
+    _require_location()
+    proj = _project_dir()
+    net_file = proj / "sumo" / "network.net.xml"
+    if not net_file.exists():
+        raise HTTPException(status_code=412, detail="Network not built. POST /model/build first.")
+
+    try:
+        from core.sim.scenario import read_net_edges, pick_closure_candidate
+        edges = read_net_edges(net_file)
+        candidate = pick_closure_candidate(net_file)
+
+        # Filter to multi-lane only (single-lane can't be meaningfully closed)
+        multi = {
+            eid: {
+                "num_lanes": d["num_lanes"],
+                "length_m": round(d["length_m"], 1),
+                "from": d["from"],
+                "to": d["to"],
+                "lanes": d["lanes"],
+            }
+            for eid, d in edges.items()
+            if d["num_lanes"] >= 2
+        }
+        return {
+            "edges": multi,
+            "total_edges": len(edges),
+            "multi_lane_edges": len(multi),
+            "recommended": candidate,
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/demand/generate")
+def generate_demand(body: DemandRequest) -> dict:
+    """Generate traffic demand (randomTrips). Required before running experiment."""
+    _require_location()
+    proj = _project_dir()
+    net_file = proj / "sumo" / "network.net.xml"
+    if not net_file.exists():
+        raise HTTPException(status_code=412, detail="Network not built. POST /model/build first.")
+
+    routes_file = proj / "sumo" / "routes.rou.xml"
+    if routes_file.exists() and not body.force:
+        n = routes_file.read_text(errors="ignore").count("<vehicle ")
+        return {"ok": True, "cached": True, "vehicle_count": n,
+                "routes_file": str(routes_file), "period": body.period}
+
+    try:
+        from config import SIM
+        from core.sim.demand import generate_routes
+        d = generate_routes(
+            net_file, proj / "sumo",
+            begin=SIM["begin"], end=SIM["end"],
+            period=body.period, fringe_factor=body.fringe_factor,
+            seed=SIM["seeds"][0],
+        )
+        # warn if too low
+        warning = None
+        if d["count"] < 100:
+            warning = (f"Only {d['count']} vehicles generated. Lower period for more traffic."
+                       " A closure on a near-empty network changes nothing.")
+        return {"ok": True, "cached": False, "vehicle_count": d["count"],
+                "routes_file": str(d["routes"]), "period": body.period,
+                "warning": warning}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/scenario/build")
+def build_scenario(body: ScenarioRequest) -> dict:
+    """Write the lane-closure additional-file. Validates edge + lane before writing."""
+    _require_location()
+    proj = _project_dir()
+    net_file = proj / "sumo" / "network.net.xml"
+    if not net_file.exists():
+        raise HTTPException(status_code=412, detail="Network not built. POST /model/build first.")
+
+    try:
+        from core.sim.scenario import build_lane_closure
+        closure_file = proj / "sumo" / "closure.add.xml"
+        desc = build_lane_closure(
+            net_file, closure_file,
+            edge_id=body.edge_id, lane_index=body.lane_index,
+            begin=body.begin, end=body.end,
+        )
+        (proj / "scenario.json").write_text(json.dumps(desc, indent=2), encoding="utf-8")
+        return {"ok": True, "scenario": desc}
+    except ValueError as exc:
+        # Invalid edge / lane — surface as 422 so the UI shows a clear error
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/experiment/status")
+def experiment_status() -> dict:
+    """Poll the current experiment state (idle | running | done | error)."""
+    return _experiment_state
+
+
+@app.post("/experiment/run")
+def run_experiment_endpoint(body: ExperimentRequest) -> dict:
+    """Run the full baseline-vs-closure experiment.
+
+    This is a synchronous call — it blocks until all seeds complete.
+    For the UI: show a spinner, then poll /experiment/status once returned.
+    Heavy but honest: the numbers don't appear until they are real.
+    """
+    global _experiment_state
+    if _experiment_state.get("status") == "running":
+        raise HTTPException(status_code=409, detail="Experiment already running. Wait for it to finish.")
+
+    _require_location()
+    proj = _project_dir()
+    net_file = proj / "sumo" / "network.net.xml"
+    routes_file = proj / "sumo" / "routes.rou.xml"
+    closure_file = proj / "sumo" / "closure.add.xml"
+
+    if not net_file.exists():
+        raise HTTPException(status_code=412, detail="Network not built.")
+    if not routes_file.exists():
+        raise HTTPException(status_code=412, detail="Routes not generated. POST /demand/generate first.")
+    if not closure_file.exists():
+        raise HTTPException(status_code=412, detail="Scenario not built. POST /scenario/build first.")
+
+    try:
+        from config import SIM, CLOSURE
+        from core.sim import run as sim_run
+        from core.sim.scenario import build_lane_closure, read_net_edges
+
+        _experiment_state = {"status": "running"}
+
+        # Rebuild closure file to match the requested edge/lane
+        edges = read_net_edges(net_file)
+        if body.edge_id not in edges:
+            raise ValueError(f"Edge '{body.edge_id}' not in network.")
+        desc = build_lane_closure(
+            net_file, closure_file,
+            edge_id=body.edge_id, lane_index=body.lane_index,
+            begin=CLOSURE["begin"], end=CLOSURE["end"],
+        )
+        (proj / "scenario.json").write_text(json.dumps(desc, indent=2), encoding="utf-8")
+
+        seeds = body.seeds if body.seeds else SIM["seeds"]
+        result = sim_run.run_experiment(
+            net_file, routes_file,
+            proj / "sumo" / "results",
+            closure_file,
+            seeds=seeds,
+            begin=SIM["begin"], end=SIM["end"],
+            closed_edge=body.edge_id,
+        )
+
+        # Persist metrics
+        metrics_data = {k: v for k, v in result.items() if k != "table"}
+        (proj / "metrics.json").write_text(json.dumps(metrics_data, indent=2), encoding="utf-8")
+
+        _experiment_state = {
+            "status": "done",
+            "result": result,
+            "scenario": desc,
+        }
+        return _experiment_state
+
+    except ValueError as exc:
+        _experiment_state = {"status": "error", "detail": str(exc)}
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        _experiment_state = {"status": "error", "detail": str(exc)}
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/export/zip")
+def export_zip() -> dict:
+    """Package the project as a ZIP and return its path."""
+    _require_location()
+    proj = _project_dir()
+    metrics_path = proj / "metrics.json"
+    if not metrics_path.exists():
+        raise HTTPException(status_code=412,
+                            detail="No experiment results yet. Run an experiment first.")
+
+    try:
+        from core.export import package as EX
+        from core import provenance as P
+
+        loc_data = _read_location() or {}
+        prov_path = proj / "provenance.json"
+        prov = P.ProvenanceLog(prov_path)
+
+        # Read metrics for README
+        metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+        from core.sim.metrics import format_table
+        table = format_table(metrics.get("comparison", {"rows": [], "n_seeds": 0,
+                                                         "significant": False, "verdict": ""}))
+
+        EX.write_source_manifest(proj, prov.entries)
+        EX.write_readme(proj, location=loc_data, results_table=table)
+        zip_path = EX.export_project(
+            proj, proj.parent / "RoadTwin_Project_export.zip"
+        )
+        return {"ok": True, "zip_path": str(zip_path),
+                "size_kb": round(zip_path.stat().st_size / 1024, 1)}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 # ── entry point ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     port = int(os.environ.get("ROADTWIN_PORT", "8765"))

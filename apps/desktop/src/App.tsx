@@ -1,9 +1,11 @@
-/* RoadTwin — Phase 3 App
- * Flow: sidecar boots → location gate (if not confirmed) → main UI
+/* RoadTwin — App shell
+ * Flow: sidecar boots → location gate → tabbed main workspace
+ * Tabs: Pipeline (P4) | Experiment (P6)
  */
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { LocationGateway } from "./LocationGateway";
+import { ExperimentWorkspace } from "./ExperimentWorkspace";
 import "./App.css";
 
 declare global {
@@ -36,8 +38,8 @@ async function fetchLocation(port: number): Promise<ConfirmedLocation | null> {
 }
 
 export default function App() {
-  const [sidecar, setSidecar]     = useState<SidecarStatus>({ kind: "booting" });
-  const [location, setLocation]   = useState<ConfirmedLocation | null>(null);
+  const [sidecar, setSidecar]       = useState<SidecarStatus>({ kind: "booting" });
+  const [location, setLocation]     = useState<ConfirmedLocation | null>(null);
   const [checkingLoc, setCheckingLoc] = useState(false);
 
   useEffect(() => {
@@ -46,7 +48,6 @@ export default function App() {
         await fetchHealth(port);
         window.__rtPort = port;
         setSidecar({ kind: "ready", port });
-
         setCheckingLoc(true);
         const loc = await fetchLocation(port);
         setLocation(loc);
@@ -55,18 +56,15 @@ export default function App() {
         setSidecar({ kind: "error", message: String(e) });
       }
     });
-
     const unlistenError = listen<string>("sidecar-error", ({ payload: message }) => {
       setSidecar({ kind: "error", message });
     });
-
     return () => {
       unlistenReady.then((f) => f());
       unlistenError.then((f) => f());
     };
   }, []);
 
-  // ── booting ──────────────────────────────────────────────────────────────
   if (sidecar.kind === "booting" || checkingLoc) {
     return (
       <div className="shell">
@@ -96,7 +94,6 @@ export default function App() {
     );
   }
 
-  // ── sidecar ready — check location gate ──────────────────────────────────
   if (!location) {
     return (
       <div className="shell">
@@ -106,17 +103,15 @@ export default function App() {
     );
   }
 
-  // ── location confirmed — main workspace ──────────────────────────────────
   return (
     <div className="shell">
       <Topbar tag="ONLINE" tagClass="badge-online" />
-      <MainWorkspace location={location} port={sidecar.port}
-                     onReset={() => setLocation(null)} />
+      <MainWorkspace location={location} port={sidecar.port} onReset={() => setLocation(null)} />
     </div>
   );
 }
 
-// ── sub-components ────────────────────────────────────────────────────────────
+// ── Topbar ────────────────────────────────────────────────────────────────────
 
 function Topbar({ tag, tagClass }: { tag?: string; tagClass?: string }) {
   return (
@@ -128,50 +123,19 @@ function Topbar({ tag, tagClass }: { tag?: string; tagClass?: string }) {
   );
 }
 
+// ── Main Workspace (tabbed) ───────────────────────────────────────────────────
+
+type WorkspaceTab = "pipeline" | "experiment";
+
 interface WorkspaceProps {
   location: ConfirmedLocation;
   port: number;
   onReset: () => void;
 }
 
-type PipelineStep = "idle" | "acquiring" | "building" | "done" | "error";
-
 function MainWorkspace({ location, port, onReset }: WorkspaceProps) {
-  const [step, setStep]     = useState<PipelineStep>("idle");
-  const [log, setLog]       = useState<string[]>([]);
-  const [stats, setStats]   = useState<Record<string, unknown> | null>(null);
-  const api = `http://127.0.0.1:${port}`;
-
-  function addLog(msg: string) { setLog((l) => [...l, msg]); }
-
-  async function runPipeline() {
-    setStep("acquiring");
-    setLog([]);
-    setStats(null);
-
-    try {
-      addLog("→ Downloading OSM data…");
-      const acq = await fetch(`${api}/acquire`, { method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ force: false }) });
-      if (!acq.ok) throw new Error((await acq.json()).detail ?? `acquire HTTP ${acq.status}`);
-      const acqData = await acq.json();
-      addLog(`✓ OSM acquired  ${acqData.size_kb} KB`);
-
-      setStep("building");
-      addLog("→ Building canonical model (netconvert)…");
-      const build = await fetch(`${api}/model/build`, { method: "POST",
-        headers: { "Content-Type": "application/json" }, body: "{}" });
-      if (!build.ok) throw new Error((await build.json()).detail ?? `build HTTP ${build.status}`);
-      const buildData = await build.json();
-      setStats(buildData);
-      addLog(`✓ Model built  ${buildData.roads} roads · ${buildData.lanes} lanes · ${buildData.junctions} junctions`);
-      setStep("done");
-    } catch (e) {
-      addLog(`✗ ${String(e)}`);
-      setStep("error");
-    }
-  }
+  const [activeTab, setActiveTab] = useState<WorkspaceTab>("pipeline");
+  const [pipelineDone, setPipelineDone] = useState(false);
 
   return (
     <main className="workspace">
@@ -187,42 +151,173 @@ function MainWorkspace({ location, port, onReset }: WorkspaceProps) {
         <button className="btn-ghost" onClick={onReset} title="Change location">✎ Change</button>
       </div>
 
-      {/* ── pipeline card ── */}
-      <div className="pipeline-card">
-        <h2>Baseline Model Pipeline</h2>
-        <p className="ws-hint">
-          Downloads OSM road data for your confirmed AOI, compiles it with
-          netconvert, and builds the canonical RoadTwin model.
-        </p>
-
+      {/* ── tab bar ── */}
+      <div className="tab-bar">
         <button
-          id="run-pipeline-btn"
-          className="btn-primary lg"
-          onClick={runPipeline}
-          disabled={step === "acquiring" || step === "building"}
+          className={`tab-btn ${activeTab === "pipeline" ? "active" : ""}`}
+          onClick={() => setActiveTab("pipeline")}
+          id="tab-pipeline"
         >
-          {step === "idle" || step === "error" || step === "done"
-            ? "▶ Run Pipeline"
-            : step === "acquiring" ? "Acquiring OSM…" : "Building model…"}
+          <span className="tab-icon">⚙</span> Pipeline
+          {pipelineDone && <span className="tab-done-dot" title="Pipeline complete" />}
         </button>
+        <button
+          className={`tab-btn ${activeTab === "experiment" ? "active" : ""}`}
+          onClick={() => setActiveTab("experiment")}
+          id="tab-experiment"
+          disabled={!pipelineDone}
+          title={pipelineDone ? undefined : "Run the pipeline first"}
+        >
+          <span className="tab-icon">⚗</span> Experiment
+          {!pipelineDone && <span className="tab-lock" title="Run pipeline first">🔒</span>}
+        </button>
+      </div>
 
-        {log.length > 0 && (
-          <pre className="pipeline-log">
-            {log.join("\n")}
-          </pre>
+      {/* ── tab content ── */}
+      <div className="tab-content">
+        {activeTab === "pipeline" && (
+          <PipelineTab
+            port={port}
+            onComplete={() => {
+              setPipelineDone(true);
+              setActiveTab("experiment");
+            }}
+          />
         )}
+        {activeTab === "experiment" && pipelineDone && (
+          <ExperimentWorkspace />
+        )}
+      </div>
+    </main>
+  );
+}
 
-        {stats && (
-          <div className="stats-grid">
-            {Object.entries(stats).filter(([k]) => k !== "ok" && k !== "project_dir").map(([k, v]) => (
+// ── Pipeline Tab ──────────────────────────────────────────────────────────────
+
+type PipelineStep = "idle" | "acquiring" | "building" | "done" | "error";
+
+function PipelineTab({ port, onComplete }: { port: number; onComplete: () => void }) {
+  const [step, setStep]   = useState<PipelineStep>("idle");
+  const [log, setLog]     = useState<string[]>([]);
+  const [stats, setStats] = useState<Record<string, unknown> | null>(null);
+  const logRef            = useRef<HTMLPreElement>(null);
+  const api = `http://127.0.0.1:${port}`;
+
+  function addLog(msg: string) { setLog((l) => [...l, msg]); }
+
+  useEffect(() => {
+    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
+  }, [log]);
+
+  async function runPipeline() {
+    setStep("acquiring");
+    setLog([]);
+    setStats(null);
+
+    try {
+      // Step 1: Acquire OSM
+      addLog("→ Downloading OSM road data…");
+      const acq = await fetch(`${api}/acquire`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ force: false }),
+      });
+      if (!acq.ok) throw new Error((await acq.json()).detail ?? `acquire HTTP ${acq.status}`);
+      const acqData = await acq.json();
+      addLog(`✓ OSM acquired  (${acqData.size_kb} KB${acqData.cached ? ", cached" : ""})`);
+
+      // Step 2: Build model
+      setStep("building");
+      addLog("→ Building canonical model (netconvert → RoadTwin schema)…");
+      const build = await fetch(`${api}/model/build`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      if (!build.ok) throw new Error((await build.json()).detail ?? `build HTTP ${build.status}`);
+      const buildData = await build.json();
+      setStats(buildData);
+      addLog(`✓ Model built — ${buildData.roads} roads · ${buildData.lanes} lanes · ${buildData.junctions} junctions`);
+      addLog("✓ roads.geojson + junctions.geojson written");
+      addLog("✓ OpenDRIVE round-trip: will be validated on experiment run");
+
+      setStep("done");
+      // Notify parent after a short delay so the user sees the "done" state
+      setTimeout(onComplete, 800);
+
+    } catch (e) {
+      addLog(`✗ ${String(e)}`);
+      setStep("error");
+    }
+  }
+
+  return (
+    <div className="pipeline-card">
+      <h2>Baseline Model Pipeline</h2>
+      <p className="ws-hint">
+        Downloads OSM road data for your confirmed AOI, runs netconvert, builds
+        the canonical RoadTwin model (roads, lanes, junctions with full provenance).
+        This takes 10–30 s depending on AOI size.
+      </p>
+
+      {/* pipeline steps visual */}
+      <div className="pipeline-steps">
+        <PStep label="Acquire OSM" done={["building","done"].includes(step)} active={step === "acquiring"} />
+        <div className="pipeline-connector" />
+        <PStep label="netconvert" done={step === "done"} active={step === "building"} />
+        <div className="pipeline-connector" />
+        <PStep label="RoadTwin model" done={step === "done"} active={false} />
+      </div>
+
+      <button
+        id="run-pipeline-btn"
+        className="btn-primary lg"
+        onClick={runPipeline}
+        disabled={step === "acquiring" || step === "building"}
+      >
+        {step === "idle" || step === "error"
+          ? "▶ Run Pipeline"
+          : step === "done"
+          ? "✓ Done — Re-run"
+          : step === "acquiring"
+          ? "⏳ Acquiring OSM…"
+          : "⏳ Building model…"}
+      </button>
+
+      {log.length > 0 && (
+        <pre className="pipeline-log" ref={logRef}>
+          {log.join("\n")}
+        </pre>
+      )}
+
+      {stats && (
+        <div className="stats-grid">
+          {Object.entries(stats)
+            .filter(([k]) => k !== "ok" && k !== "project_dir")
+            .map(([k, v]) => (
               <div key={k} className="stat-cell">
                 <span className="stat-val">{String(v)}</span>
                 <span className="stat-key">{k.replace(/_/g, " ")}</span>
               </div>
             ))}
-          </div>
-        )}
-      </div>
-    </main>
+        </div>
+      )}
+
+      {step === "error" && (
+        <p className="ws-hint err" style={{ marginTop: 8 }}>
+          Check SUMO_HOME and network connectivity. See log above for detail.
+        </p>
+      )}
+    </div>
+  );
+}
+
+function PStep({ label, done, active }: { label: string; done: boolean; active: boolean }) {
+  const cls = done ? "pstep done" : active ? "pstep active" : "pstep";
+  return (
+    <div className={cls}>
+      <div className="pstep-dot">{done ? "✓" : active ? "…" : ""}</div>
+      <span className="pstep-label">{label}</span>
+    </div>
   );
 }
