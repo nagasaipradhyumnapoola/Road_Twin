@@ -486,6 +486,70 @@ def run_experiment_endpoint(body: ExperimentRequest) -> dict:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+# ── Vision Endpoints (Phase 7) ────────────────────────────────────────────────
+
+@app.get("/vision/status")
+def vision_status() -> dict:
+    """Check if vision environment and model weights are ready."""
+    vision_python = C.ROOT / ".venv-vision" / "Scripts" / "python.exe"
+    has_venv = vision_python.exists()
+    return {
+        "available": has_venv,
+        "venv_path": str(vision_python) if has_venv else None,
+        "model": "facebook/sam2.1-hiera-small",
+    }
+
+
+@app.post("/vision/run")
+def vision_run(edge_id: str | None = None, zoom: int = 18) -> dict:
+    """Execute Phase 7 visual evidence extraction pipeline."""
+    _require_location()
+    proj = _project_dir()
+
+    vision_python = C.ROOT / ".venv-vision" / "Scripts" / "python.exe"
+    if not vision_python.exists():
+        raise HTTPException(status_code=503,
+                            detail="Vision environment not configured (.venv-vision missing).")
+
+    import subprocess
+    cmd = [str(vision_python), str(C.ROOT / "scripts" / "run_vision.py"),
+           "--project", proj.name, "--zoom", str(zoom)]
+    if edge_id:
+        cmd.extend(["--edge", edge_id])
+
+    res = subprocess.run(cmd, capture_output=True, text=True, cwd=str(C.ROOT))
+    if res.returncode != 0:
+        raise HTTPException(status_code=500, detail=f"Vision extraction failed: {res.stderr or res.stdout}")
+
+    # Read generated observations
+    obs_file = proj / "observations.json"
+    observations = json.loads(obs_file.read_text(encoding="utf-8")) if obs_file.exists() else []
+
+    return {
+        "ok": True,
+        "observations_count": len(observations),
+        "observations": observations,
+        "has_road_mask": (proj / "road_mask.geojson").exists(),
+        "has_mosaic": (proj / "vision" / "mosaic.png").exists(),
+    }
+
+
+@app.get("/vision/observations")
+def vision_observations() -> dict:
+    """Return latest generated observations and road mask."""
+    proj = _project_dir()
+    obs_file = proj / "observations.json"
+    mask_file = proj / "road_mask.geojson"
+
+    observations = json.loads(obs_file.read_text(encoding="utf-8")) if obs_file.exists() else []
+    road_mask = json.loads(mask_file.read_text(encoding="utf-8")) if mask_file.exists() else None
+
+    return {
+        "observations": observations,
+        "road_mask": road_mask,
+    }
+
+
 @app.post("/export/zip")
 def export_zip() -> dict:
     """Package the project as a ZIP and return its path."""

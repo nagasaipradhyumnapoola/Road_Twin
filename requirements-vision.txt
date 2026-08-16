@@ -15,11 +15,14 @@
 #   pip install torch --index-url https://download.pytorch.org/whl/cu124
 
 torch>=2.3
+torchvision>=0.18
 transformers>=4.57          # Sam2Model / Sam2Processor landed here
 accelerate>=0.30
 pillow>=10.3
 numpy>=1.26
 requests>=2.32
+lxml>=5.0
+pyproj>=3.6
 fastapi>=0.115
 uvicorn[standard]>=0.30
 

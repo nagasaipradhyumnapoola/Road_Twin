@@ -1,0 +1,28 @@
+[
+  {
+    "id": "obs-001",
+    "source": "sam2",
+    "model": "facebook/sam2.1-hiera-small",
+    "type": "lane_count_estimate",
+    "feature": "lane_count",
+    "value": 15,
+    "geometry_kind": "georeferenced",
+    "attached_to": {
+      "road_id": "rt-road-47572742#4"
+    },
+    "confidence": 0.431,
+    "status": "REVIEW",
+    "evidence": {
+      "feature": "lane_count",
+      "value": 15,
+      "raw_estimate": 14.72,
+      "measured_width_m": 51.53,
+      "assumed_lane_width_m": 3.5,
+      "samples": 30,
+      "samples_used": 24,
+      "width_cv": 0.176,
+      "confidence": 0.431,
+      "method": "mask width perpendicular to OSM centerline / nominal lane width"
+    }
+  }
+]
