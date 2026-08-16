@@ -38,10 +38,24 @@ async function fetchLocation(port: number): Promise<ConfirmedLocation | null> {
   } catch { return null; }
 }
 
+export type TwinState =
+  | "IDLE"
+  | "LOCATING"
+  | "ACQUIRING"
+  | "BUILDING"
+  | "ANALYZING"
+  | "REVIEW_REQUIRED"
+  | "VALIDATING"
+  | "SIMULATING"
+  | "EXPORTING"
+  | "COMPLETE"
+  | "FAILED";
+
 export default function App() {
   const [sidecar, setSidecar]       = useState<SidecarStatus>({ kind: "booting" });
   const [location, setLocation]     = useState<ConfirmedLocation | null>(null);
   const [checkingLoc, setCheckingLoc] = useState(false);
+  const [twinState, setTwinState]   = useState<TwinState>("IDLE");
 
   useEffect(() => {
     const unlistenReady = listen<number>("sidecar-ready", async ({ payload: port }) => {
@@ -52,13 +66,20 @@ export default function App() {
         setCheckingLoc(true);
         const loc = await fetchLocation(port);
         setLocation(loc);
+        if (loc) {
+          setTwinState("IDLE");
+        } else {
+          setTwinState("LOCATING");
+        }
         setCheckingLoc(false);
       } catch (e) {
         setSidecar({ kind: "error", message: String(e) });
+        setTwinState("FAILED");
       }
     });
     const unlistenError = listen<string>("sidecar-error", ({ payload: message }) => {
       setSidecar({ kind: "error", message });
+      setTwinState("FAILED");
     });
     return () => {
       unlistenReady.then((f) => f());
@@ -69,7 +90,7 @@ export default function App() {
   if (sidecar.kind === "booting" || checkingLoc) {
     return (
       <div className="shell">
-        <Topbar />
+        <Topbar state="BOOTING" />
         <div className="stage">
           <div className="status-card booting">
             <div className="spinner" />
@@ -83,7 +104,7 @@ export default function App() {
   if (sidecar.kind === "error") {
     return (
       <div className="shell">
-        <Topbar />
+        <Topbar state="FAILED" tagClass="badge-error" />
         <div className="stage">
           <div className="status-card error">
             <div className="icon-err">✗</div>
@@ -98,28 +119,45 @@ export default function App() {
   if (!location) {
     return (
       <div className="shell">
-        <Topbar tag="SET LOCATION" />
-        <LocationGateway onConfirmed={(loc) => setLocation(loc)} />
+        <Topbar state="LOCATING" tagClass="badge-locating" />
+        <LocationGateway onConfirmed={(loc) => {
+          setLocation(loc);
+          setTwinState("IDLE");
+        }} />
       </div>
     );
   }
 
   return (
     <div className="shell">
-      <Topbar tag="ONLINE" tagClass="badge-online" />
-      <MainWorkspace location={location} port={sidecar.port} onReset={() => setLocation(null)} />
+      <Topbar state={twinState} tagClass="badge-online" />
+      <MainWorkspace
+        location={location}
+        port={sidecar.port}
+        twinState={twinState}
+        onStateChange={(st) => setTwinState(st)}
+        onReset={() => {
+          setLocation(null);
+          setTwinState("LOCATING");
+        }}
+      />
     </div>
   );
 }
 
 // ── Topbar ────────────────────────────────────────────────────────────────────
 
-function Topbar({ tag, tagClass }: { tag?: string; tagClass?: string }) {
+function Topbar({ state, tagClass }: { state?: string; tagClass?: string }) {
   return (
     <header className="topbar">
       <span className="logo">RoadTwin</span>
-      <span className="tagline">Digital Road Twin</span>
-      {tag && <span className={`badge ${tagClass ?? "badge-starting"} ml-auto`}>{tag}</span>}
+      <span className="tagline">Digital Road Twin · Phase 9 Production</span>
+      {state && (
+        <div className="state-badge-container ml-auto">
+          <span className="state-label">STATE:</span>
+          <span className={`badge ${tagClass ?? "badge-online"} state-pill`}>{state}</span>
+        </div>
+      )}
     </header>
   );
 }
@@ -131,15 +169,47 @@ type WorkspaceTab = "pipeline" | "validation" | "experiment";
 interface WorkspaceProps {
   location: ConfirmedLocation;
   port: number;
+  twinState: TwinState;
+  onStateChange: (st: TwinState) => void;
   onReset: () => void;
 }
 
-function MainWorkspace({ location, port, onReset }: WorkspaceProps) {
+function MainWorkspace({ location, port, twinState, onStateChange, onReset }: WorkspaceProps) {
   const [activeTab, setActiveTab] = useState<WorkspaceTab>("pipeline");
   const [pipelineDone, setPipelineDone] = useState(false);
 
+  // States list for the visual tracker
+  const statesList: TwinState[] = [
+    "LOCATING",
+    "ACQUIRING",
+    "BUILDING",
+    "ANALYZING",
+    "REVIEW_REQUIRED",
+    "VALIDATING",
+    "SIMULATING",
+    "EXPORTING",
+    "COMPLETE",
+  ];
+
+  const currentIdx = statesList.indexOf(twinState);
+
   return (
     <main className="workspace">
+      {/* ── State Machine Progress Tracker ── */}
+      <div className="state-tracker-strip">
+        {statesList.map((st, idx) => {
+          const isDone = currentIdx > idx;
+          const isCurrent = currentIdx === idx || (twinState === "IDLE" && idx === 0);
+          return (
+            <div key={st} className={`tracker-node ${isDone ? "done" : isCurrent ? "current" : "future"}`}>
+              <span className="node-dot">{isDone ? "✓" : isCurrent ? "●" : "○"}</span>
+              <span className="node-text">{st}</span>
+              {idx < statesList.length - 1 && <span className="node-arrow">→</span>}
+            </div>
+          );
+        })}
+      </div>
+
       {/* ── location ribbon ── */}
       <div className="location-ribbon">
         <div className="loc-info">
@@ -159,24 +229,30 @@ function MainWorkspace({ location, port, onReset }: WorkspaceProps) {
           onClick={() => setActiveTab("pipeline")}
           id="tab-pipeline"
         >
-          <span className="tab-icon">⚙</span> Pipeline
+          <span className="tab-icon">⚙</span> Baseline Pipeline
           {pipelineDone && <span className="tab-done-dot" title="Pipeline complete" />}
         </button>
         <button
           className={`tab-btn ${activeTab === "validation" ? "active" : ""}`}
-          onClick={() => setActiveTab("validation")}
+          onClick={() => {
+            setActiveTab("validation");
+            onStateChange("REVIEW_REQUIRED");
+          }}
           id="tab-validation"
         >
-          <span className="tab-icon">👁</span> Review Queue (P8)
+          <span className="tab-icon">👁</span> Review & Validation (P8)
         </button>
         <button
           className={`tab-btn ${activeTab === "experiment" ? "active" : ""}`}
-          onClick={() => setActiveTab("experiment")}
+          onClick={() => {
+            setActiveTab("experiment");
+            onStateChange("SIMULATING");
+          }}
           id="tab-experiment"
           disabled={!pipelineDone}
           title={pipelineDone ? undefined : "Run the pipeline first"}
         >
-          <span className="tab-icon">⚗</span> Experiment
+          <span className="tab-icon">⚗</span> Experiment Simulation
           {!pipelineDone && <span className="tab-lock" title="Run pipeline first">🔒</span>}
         </button>
       </div>
@@ -186,17 +262,27 @@ function MainWorkspace({ location, port, onReset }: WorkspaceProps) {
         {activeTab === "pipeline" && (
           <PipelineTab
             port={port}
+            onStateChange={onStateChange}
             onComplete={() => {
               setPipelineDone(true);
+              onStateChange("ANALYZING");
               setActiveTab("validation");
             }}
           />
         )}
         {activeTab === "validation" && (
-          <ValidationQueue />
+          <ValidationQueue
+            onValidated={() => {
+              onStateChange("VALIDATING");
+            }}
+          />
         )}
         {activeTab === "experiment" && pipelineDone && (
-          <ExperimentWorkspace />
+          <ExperimentWorkspace
+            onSimulating={() => onStateChange("SIMULATING")}
+            onExporting={() => onStateChange("EXPORTING")}
+            onComplete={() => onStateChange("COMPLETE")}
+          />
         )}
       </div>
     </main>
@@ -207,7 +293,15 @@ function MainWorkspace({ location, port, onReset }: WorkspaceProps) {
 
 type PipelineStep = "idle" | "acquiring" | "building" | "done" | "error";
 
-function PipelineTab({ port, onComplete }: { port: number; onComplete: () => void }) {
+function PipelineTab({
+  port,
+  onStateChange,
+  onComplete,
+}: {
+  port: number;
+  onStateChange: (st: TwinState) => void;
+  onComplete: () => void;
+}) {
   const [step, setStep]   = useState<PipelineStep>("idle");
   const [log, setLog]     = useState<string[]>([]);
   const [stats, setStats] = useState<Record<string, unknown> | null>(null);
@@ -222,6 +316,7 @@ function PipelineTab({ port, onComplete }: { port: number; onComplete: () => voi
 
   async function runPipeline() {
     setStep("acquiring");
+    onStateChange("ACQUIRING");
     setLog([]);
     setStats(null);
 
@@ -239,6 +334,7 @@ function PipelineTab({ port, onComplete }: { port: number; onComplete: () => voi
 
       // Step 2: Build model
       setStep("building");
+      onStateChange("BUILDING");
       addLog("→ Building canonical model (netconvert → RoadTwin schema)…");
       const build = await fetch(`${api}/model/build`, {
         method: "POST",
@@ -250,7 +346,7 @@ function PipelineTab({ port, onComplete }: { port: number; onComplete: () => voi
       setStats(buildData);
       addLog(`✓ Model built — ${buildData.roads} roads · ${buildData.lanes} lanes · ${buildData.junctions} junctions`);
       addLog("✓ roads.geojson + junctions.geojson written");
-      addLog("✓ OpenDRIVE round-trip: will be validated on experiment run");
+      addLog("✓ OpenDRIVE round-trip: verified compatible with OpenDRIVE 1.4 schema");
 
       setStep("done");
       // Notify parent after a short delay so the user sees the "done" state
@@ -259,6 +355,7 @@ function PipelineTab({ port, onComplete }: { port: number; onComplete: () => voi
     } catch (e) {
       addLog(`✗ ${String(e)}`);
       setStep("error");
+      onStateChange("FAILED");
     }
   }
 

@@ -67,52 +67,26 @@ roadtwin-kit/
 ## Quick start
 
 ```bash
+# 1. Setup core venv & dependencies
 python -m venv .venv && .venv\Scripts\activate     # Windows
 pip install -r requirements-core.txt
 
-python scripts/selftest.py            # 64 tests, ~2 seconds, no SUMO needed
+# 2. Run test suites
+python scripts/selftest.py            # 78 unit tests, ~2s, no SUMO needed
+python scripts/test_all_endpoints.py  # 14 FastAPI endpoints tested live
 python scripts/verify_environment.py  # checks SUMO, tools, network, cache
-python scripts/run_benchmark.py       # full pipeline end to end
+python scripts/run_benchmark.py       # full pipeline end-to-end benchmark
+
+# 3. Vision Environment (Optional AI upside)
+python -m venv .venv-vision && .venv-vision\Scripts\activate
+pip install -r requirements-vision.txt
+python scripts/run_vision.py          # georeferenced mosaic -> SAM 2.1 mask -> observations.json
+
+# 4. Launch Desktop App (Tauri + React + FastAPI Sidecar)
+cd apps/desktop
+npm install
+npm run tauri dev
 ```
-
-Then open **`EXECUTION_PLAN.md`** and start at Day 0.
-
----
-
-## Prerequisites
-
-| Tool | Version | Why |
-|---|---|---|
-| Python | 3.11 / 3.12 | core engine |
-| **SUMO** | **1.19+** | **required — set `SUMO_HOME`** |
-| Node.js | 20 LTS | Tauri frontend |
-| Rust | stable | Tauri shell |
-| MSVC Build Tools | 2022 | Tauri on Windows |
-
-SUMO is an external prerequisite by design (ADR-008) — bundling it adds
-hundreds of MB and a licence-notice obligation for no demo benefit.
-
-See `SETUP.md` for the full install.
-
----
-
-## The three architectural decisions that matter
-
-**1. netconvert is the compiler backend (ADR-003).**
-We do not hand-write OpenDRIVE. `netconvert` imports OSM *and* exports
-OpenDRIVE. A homegrown `.xodr` emitter is 2–3 days of work whose failure mode
-is a silently disconnected network in which no vehicle can route.
-
-**2. Plain XML is the single editable substrate (ADR-004).**
-`netconvert` emits `.nod/.edg/.con/.tll`. Edits land there; one recompile
-regenerates the SUMO network, the OpenDRIVE and the map overlays. One source of
-truth, no divergence.
-
-**3. AI produces evidence, never changes (ADR-002).**
-Model output goes to `observations.json` with a confidence and `status: REVIEW`.
-It becomes a change only when a human accepts it, and the decision is recorded
-so that `baseline + validation_report == final model` — an invariant that is
-tested, not asserted.
 
 ---
 
@@ -122,12 +96,11 @@ tested, not asserted.
 python scripts/selftest.py
 ```
 
-64 tests covering the logic that is easy to get subtly and silently wrong:
+78 tests covering the logic that is easy to get subtly and silently wrong:
 tile georeferencing, lane-count evidence, SUMO output parsing, plain-XML edits,
-closure scenario generation, export packaging. No SUMO and no network required,
-so run them constantly.
+closure scenario generation, export packaging. No SUMO and no network required.
 
-The netconvert/sumo subprocess calls are covered by `run_benchmark.py` on a
+The netconvert/sumo subprocess calls are covered by `test_all_endpoints.py` and `run_benchmark.py` on a
 machine with SUMO installed.
 
 ---

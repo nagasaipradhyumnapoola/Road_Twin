@@ -80,6 +80,48 @@ body {
 .badge-starting { background: rgba(251,191,36,.10); color: #fbbf24; border: 1px solid rgba(251,191,36,.22); }
 .badge-online   { background: var(--green-lo);      color: var(--green); border: 1px solid rgba(34,197,94,.22); }
 .badge-error    { background: var(--red-lo);         color: var(--red);   border: 1px solid rgba(239,68,68,.22); }
+.badge-locating { background: var(--accent-lo);      color: var(--accent-hi); border: 1px solid rgba(59,130,246,.22); }
+
+.state-badge-container {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.state-label {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  letter-spacing: 0.5px;
+}
+.state-pill {
+  padding: 4px 12px;
+  font-size: 11px;
+}
+
+/* ── State Tracker Strip ────────────────────────────────────────────── */
+.state-tracker-strip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 24px;
+  background: var(--surface2);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+}
+.tracker-node {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-family: var(--mono);
+  white-space: nowrap;
+}
+.tracker-node.done { color: var(--green); }
+.tracker-node.current { color: #60a5fa; font-weight: 700; }
+.tracker-node.future { color: var(--text-dim); opacity: 0.6; }
+.node-dot { font-size: 11px; }
+.node-arrow { margin-left: 6px; color: var(--border2); }
 
 /* ── Stage (boot/error) ─────────────────────────────────────────────── */
 .stage {

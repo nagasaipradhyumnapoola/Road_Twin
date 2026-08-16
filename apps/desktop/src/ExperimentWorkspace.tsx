@@ -71,9 +71,19 @@ type Step =
   | "done"
   | "error";
 
+interface ExperimentWorkspaceProps {
+  onSimulating?: () => void;
+  onExporting?: () => void;
+  onComplete?: () => void;
+}
+
 // ── component ─────────────────────────────────────────────────────────────────
 
-export function ExperimentWorkspace() {
+export function ExperimentWorkspace({
+  onSimulating,
+  onExporting,
+  onComplete,
+}: ExperimentWorkspaceProps = {}) {
   // Network edges
   const [edges, setEdges]             = useState<Record<string, EdgeInfo>>({});
   const [recommended, setRecommended] = useState<{ edge_id: string; num_lanes: number; length_m: number } | null>(null);
@@ -201,6 +211,7 @@ export function ExperimentWorkspace() {
     setRunning(true);
     setStep("running");
     setResult(null);
+    onSimulating?.();
 
     addLog(`→ Running experiment: edge=${selectedEdge}  lane=${selectedLane}  seeds=${parsedSeeds.join(",")}`);
     addLog(`  Baseline: all lanes open`);
@@ -227,6 +238,7 @@ export function ExperimentWorkspace() {
 
       setResult(data);
       setStep("done");
+      onComplete?.();
       const cmp = data.result?.comparison;
       if (cmp) {
         addLog(`✓ Experiment complete — ${cmp.n_seeds} seeds`);
@@ -247,6 +259,7 @@ export function ExperimentWorkspace() {
   // ── export zip ───────────────────────────────────────────────────────────
   async function exportZip() {
     setExporting(true);
+    onExporting?.();
     setZipError("");
     setZipPath("");
     try {
@@ -257,6 +270,7 @@ export function ExperimentWorkspace() {
       }
       const data = await r.json();
       setZipPath(data.zip_path);
+      onComplete?.();
     } catch (e) {
       setZipError(String(e));
     } finally {
