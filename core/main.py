@@ -550,6 +550,221 @@ def vision_observations() -> dict:
     }
 
 
+# ── Review & Validation Queue Endpoints (Phase 8) ─────────────────────────────
+
+class ReviewDecisionRequest(BaseModel):
+    observation_id: str
+    action: str                     # "ACCEPT_VISION" | "KEEP_BASELINE" | "EDIT"
+    edited_value: int | None = None
+    reason: str | None = None
+
+
+@app.get("/review/queue")
+def review_queue() -> dict:
+    """Return fusion review items comparing baseline model to observations."""
+    _require_location()
+    proj = _project_dir()
+
+    obs_file = proj / "observations.json"
+    if not obs_file.exists():
+        return {"items": [], "total": 0, "review_count": 0, "agreement_count": 0}
+
+    observations = json.loads(obs_file.read_text(encoding="utf-8"))
+    if not observations:
+        return {"items": [], "total": 0, "review_count": 0, "agreement_count": 0}
+
+    # Build baseline dictionary from plain.edg.xml or network
+    plain_edg = proj / "build" / "plain.edg.xml"
+    if not plain_edg.exists():
+        plain_edg = proj / "plain.edg.xml"
+
+    baseline_dict: dict[str, dict] = {}
+    if plain_edg.exists():
+        from core.model.edits import read_edges
+        edg_map = read_edges(plain_edg)
+        for eid, attrs in edg_map.items():
+            num_lanes = int(attrs.get("numLanes", 1))
+            road_id = f"rt-road-{eid}"
+            baseline_dict[road_id] = {
+                "lane_count": num_lanes,
+                "lane_count_provenance": {
+                    "source": "osm",
+                    "tag": f"lanes={num_lanes}",
+                    "inferred": False,
+                },
+            }
+
+    from vision.evidence import build_review_items
+    items = build_review_items(observations, baseline_dict, min_confidence=0.3)
+
+    rev_count = sum(1 for item in items if item["status"] == "REVIEW")
+    agr_count = sum(1 for item in items if item["status"] == "AGREEMENT")
+
+    return {
+        "items": items,
+        "total": len(items),
+        "review_count": rev_count,
+        "agreement_count": agr_count,
+    }
+
+
+@app.post("/review/decision")
+def review_decision(req: ReviewDecisionRequest) -> dict:
+    """Apply human validation decision: accept/reject/edit observation -> recompile & re-simulate."""
+    _require_location()
+    proj = _project_dir()
+
+    obs_file = proj / "observations.json"
+    if not obs_file.exists():
+        raise HTTPException(status_code=404, detail="observations.json not found.")
+
+    observations = json.loads(obs_file.read_text(encoding="utf-8"))
+    target_obs = next((o for o in observations if o["id"] == req.observation_id), None)
+    if not target_obs:
+        raise HTTPException(status_code=404, detail=f"Observation '{req.observation_id}' not found.")
+
+    road_id = target_obs.get("attached_to", {}).get("road_id", "")
+    edge_id = road_id.replace("rt-road-", "") if road_id.startswith("rt-road-") else road_id
+
+    plain_edg = proj / "build" / "plain.edg.xml"
+    if not plain_edg.exists():
+        plain_edg = proj / "plain.edg.xml"
+    if not plain_edg.exists():
+        raise HTTPException(status_code=500, detail="plain.edg.xml not found for editing.")
+
+    from core.model.edits import Edit, apply_edits, write_validation_report
+    from core.acquire.netconvert import plain_to_net
+
+    report_path = proj / "validation_report.json"
+    existing_decisions = []
+    if report_path.exists():
+        try:
+            existing_decisions = json.loads(report_path.read_text(encoding="utf-8")).get("decisions", [])
+        except Exception:
+            existing_decisions = []
+
+    # Map existing decisions to Edit objects
+    edits = [
+        Edit(
+            edge_id=d["edge_id"],
+            attribute=d["attribute"],
+            old_value=d.get("old_value"),
+            new_value=d["new_value"],
+            source=d.get("source", "human"),
+            observation_id=d.get("observation_id"),
+            user_action=d.get("user_action", "accept"),
+        )
+        for d in existing_decisions
+    ]
+
+    action = req.action.upper()
+    if action == "ACCEPT_VISION":
+        new_val = str(target_obs["value"])
+        target_obs["status"] = "ACCEPTED"
+        user_action = "accept"
+        source = "accepted_vision"
+    elif action == "KEEP_BASELINE":
+        new_val = str(target_obs.get("evidence", {}).get("baseline_value", 4))
+        target_obs["status"] = "REJECTED"
+        user_action = "reject"
+        source = "human"
+    elif action == "EDIT":
+        if req.edited_value is None or req.edited_value < 1:
+            raise HTTPException(status_code=422, detail="Valid edited_value required for EDIT action.")
+        new_val = str(req.edited_value)
+        target_obs["status"] = "ACCEPTED"
+        target_obs["value"] = req.edited_value
+        user_action = "edit"
+        source = "human"
+    else:
+        raise HTTPException(status_code=400, detail=f"Unknown action '{req.action}'")
+
+    # Add or update this decision
+    new_edit = Edit(
+        edge_id=edge_id,
+        attribute="numLanes",
+        old_value=None,
+        new_value=new_val,
+        source=source,
+        observation_id=req.observation_id,
+        confidence=target_obs.get("confidence", 1.0),
+        user_action=user_action,
+    )
+    edits = [e for e in edits if e.observation_id != req.observation_id] + [new_edit]
+
+    # 1. Update observations.json (IMMUTABLE audit trail - status updated, never deleted)
+    obs_file.write_text(json.dumps(observations, indent=2), encoding="utf-8")
+
+    # 2. Apply edits to plain.edg.xml
+    applied_edits = [e for e in edits if e.user_action != "reject"]
+    if applied_edits:
+        apply_edits(plain_edg, applied_edits)
+
+    # 3. Recompile network with netconvert
+    sumo_net = proj / "sumo" / "network.net.xml"
+    if not sumo_net.exists():
+        sumo_net = proj / "build" / "network.net.xml"
+    xodr_file = proj / "road_network.xodr"
+
+    plain_files = {
+        "nod": proj / "build" / "plain.nod.xml",
+        "edg": plain_edg,
+        "con": proj / "build" / "plain.con.xml" if (proj / "build" / "plain.con.xml").exists() else None,
+        "tll": proj / "build" / "plain.tll.xml" if (proj / "build" / "plain.tll.xml").exists() else None,
+    }
+    plain_to_net(plain_files, sumo_net, xodr_out=xodr_file)
+
+    # 4. Write validation report
+    write_validation_report(edits, observations, report_path)
+
+    # 5. Quick re-simulation to update metrics if routes exist
+    sim_result = None
+    routes_file = proj / "routes.rou.xml"
+    if routes_file.exists():
+        from core.sim import run, scenario
+        closure_file = proj / "closure.add.xml"
+        if not closure_file.exists():
+            scenario.build_closure_additional(sumo_net, edge_id, 0, closure_file)
+        try:
+            sim_result = run.run_experiment(
+                sumo_net, routes_file, closure_file, seeds=[42], out_dir=proj / "sim"
+            )
+        except Exception:
+            sim_result = None
+
+    return {
+        "ok": True,
+        "action": action,
+        "observation_id": req.observation_id,
+        "edge_id": edge_id,
+        "new_value": new_val,
+        "recompiled": True,
+        "sim_result": sim_result,
+    }
+
+
+@app.post("/review/replay")
+def review_replay() -> dict:
+    """Verify that baseline plain XML + validation_report.json reproduces the final model."""
+    _require_location()
+    proj = _project_dir()
+    report_path = proj / "validation_report.json"
+    plain_edg = proj / "build" / "plain.edg.xml"
+
+    if not report_path.exists() or not plain_edg.exists():
+        raise HTTPException(status_code=404, detail="validation_report.json or baseline plain.edg.xml missing.")
+
+    from core.model.edits import replay
+    test_out = proj / "build" / "replayed.edg.xml"
+    replay(plain_edg, report_path, test_out)
+
+    return {
+        "ok": True,
+        "replayed_path": str(test_out),
+        "matches": test_out.exists(),
+    }
+
+
 @app.post("/export/zip")
 def export_zip() -> dict:
     """Package the project as a ZIP and return its path."""

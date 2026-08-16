@@ -199,6 +199,7 @@ def build_review_items(
             "observed_value": obs_val,
             "observation_id": obs["id"],
             "confidence": obs["confidence"],
+            "evidence": obs.get("evidence", {}),
             "agrees": base_val == obs_val,
             "status": "AGREEMENT" if base_val == obs_val else "REVIEW",
             "actions": ["ACCEPT_VISION", "KEEP_BASELINE", "EDIT"],

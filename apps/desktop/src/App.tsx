@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { LocationGateway } from "./LocationGateway";
 import { ExperimentWorkspace } from "./ExperimentWorkspace";
+import { ValidationQueue } from "./ValidationQueue";
 import "./App.css";
 
 declare global {
@@ -125,7 +126,7 @@ function Topbar({ tag, tagClass }: { tag?: string; tagClass?: string }) {
 
 // ── Main Workspace (tabbed) ───────────────────────────────────────────────────
 
-type WorkspaceTab = "pipeline" | "experiment";
+type WorkspaceTab = "pipeline" | "validation" | "experiment";
 
 interface WorkspaceProps {
   location: ConfirmedLocation;
@@ -162,6 +163,13 @@ function MainWorkspace({ location, port, onReset }: WorkspaceProps) {
           {pipelineDone && <span className="tab-done-dot" title="Pipeline complete" />}
         </button>
         <button
+          className={`tab-btn ${activeTab === "validation" ? "active" : ""}`}
+          onClick={() => setActiveTab("validation")}
+          id="tab-validation"
+        >
+          <span className="tab-icon">👁</span> Review Queue (P8)
+        </button>
+        <button
           className={`tab-btn ${activeTab === "experiment" ? "active" : ""}`}
           onClick={() => setActiveTab("experiment")}
           id="tab-experiment"
@@ -180,9 +188,12 @@ function MainWorkspace({ location, port, onReset }: WorkspaceProps) {
             port={port}
             onComplete={() => {
               setPipelineDone(true);
-              setActiveTab("experiment");
+              setActiveTab("validation");
             }}
           />
+        )}
+        {activeTab === "validation" && (
+          <ValidationQueue />
         )}
         {activeTab === "experiment" && pipelineDone && (
           <ExperimentWorkspace />
