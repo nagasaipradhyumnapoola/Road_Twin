@@ -147,10 +147,16 @@ def c_node():
 
 
 def c_rust():
+    # PATH first, then the rustup default home for the CURRENT user.
+    # (This used to also probe a hardcoded C:/Users/yashk/... path -- another
+    #  developer's machine. It could never help anyone else and made the check
+    #  look machine-specific. CARGO_HOME is rustup's own override.)
     import os
     exe = shutil.which("cargo")
     if not exe:
-        for cand in [Path(os.path.expanduser("~")) / ".cargo/bin/cargo.exe", Path("C:/Users/yashk/.cargo/bin/cargo.exe")]:
+        cargo_home = os.environ.get("CARGO_HOME") or (Path.home() / ".cargo")
+        for cand in (Path(cargo_home) / "bin" / "cargo.exe",
+                     Path(cargo_home) / "bin" / "cargo"):
             if cand.exists():
                 exe = str(cand)
                 break

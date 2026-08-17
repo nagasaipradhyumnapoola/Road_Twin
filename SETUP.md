@@ -98,7 +98,7 @@ Run all verification suites in order:
 # 1. Environment Health Check (checks SUMO, tools, cache)
 python scripts/verify_environment.py
 
-# 2. 78 Mathematical & Logic Unit Tests (No SUMO/network needed, ~2s)
+# 2. 83 Mathematical & Logic Unit Tests (No SUMO/network needed, ~2s)
 python scripts/selftest.py
 
 # 3. 14 API Endpoints & Replay Invariants Integration Test

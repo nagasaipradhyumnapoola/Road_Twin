@@ -39,6 +39,19 @@ def step(n: int, msg: str) -> float:
     return time.time()
 
 
+def skip_sim_exit_code(roundtrip_ok: bool) -> int:
+    """Exit code for a --skip-sim run, given the OpenDRIVE round-trip result.
+
+    Phase 0's whole claim is "--skip-sim produced a VALID network.net.xml and
+    road_network.xodr". Before this existed, run_benchmark computed the
+    round-trip result, printed PASS/FAIL, and then returned 0 unconditionally --
+    so a FAILED OpenDRIVE export still looked like a green Phase 0 gate. The
+    round-trip is the only automated evidence the .xodr is real, so it must
+    decide the exit code.
+    """
+    return 0 if roundtrip_ok else 3
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--offline", action="store_true", help="use cached OSM only")
@@ -90,7 +103,10 @@ def main() -> int:
 
     # -- 3 build ------------------------------------------------------------
     t = step(3, "BUILD  netconvert: OSM -> plain XML")
-    plain = NC.osm_to_plain(osm, build)
+    # bbox is passed so netconvert CLIPS to the AOI. Overpass hands back whole
+    # ways that merely touch the bbox, so without this the built network is far
+    # larger than aoi_radius_m advertises. See core/build/netconvert.py.
+    plain = NC.osm_to_plain(osm, build, aoi_bbox=bbox)
     prov.add(P.record(source="netconvert", tool="netconvert", inputs=[osm],
                       outputs=[plain["net"], plain["edg"], plain["nod"]]))
     edges = scenario.read_net_edges(plain["net"])
@@ -135,8 +151,13 @@ def main() -> int:
     print(f"    OpenDRIVE round-trip: {'PASS' if ok else 'FAIL'}")
 
     if args.skip_sim:
-        print("\n--skip-sim set, stopping here.")
-        return 0
+        code = skip_sim_exit_code(ok)
+        if code:
+            print("\n--skip-sim stopping here, but the OpenDRIVE round-trip FAILED.")
+            print("   road_network.xodr is not verifiably valid. Phase 0 is NOT green.")
+        else:
+            print("\n--skip-sim set, stopping here.")
+        return code
 
     # -- 8 demand -----------------------------------------------------------
     t = step(8, f"DEMAND  randomTrips period={C.SIM['period']}")

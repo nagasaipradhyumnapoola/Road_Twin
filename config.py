@@ -17,16 +17,35 @@ PROJECTS_DIR = ROOT / "projects"
 # BENCHMARK LOCATION
 # ---------------------------------------------------------------------------
 # !! Day 0 task: VERIFY these coordinates before you build anything on them.
-#    Run  python scripts/verify_environment.py --check-benchmark
+#    Run  python scripts/run_benchmark.py --skip-sim
+#    then open  projects/benchmark/sumo/network.net.xml  in netedit and LOOK.
+#    (There is no --check-benchmark flag; verification is this run + netedit.
+#     See prompts/day-00-setup.md §2.)
 #    Requirements (see EXECUTION_PLAN.md, Day 0):
 #      - the main road carries a `lanes` tag in OSM
 #      - at least one real junction inside the AOI
 #      - lane markings visible in satellite imagery at zoom 19
 # ---------------------------------------------------------------------------
+# Verified 2026-08-18 against the cached extract (assets/benchmark/osm_*.osm).
+# The previous centre (12.8231, 80.0442) sat 462 m from the nearest point of
+# GST Road -- the corridor this benchmark is named for only clipped the AOI
+# corner (334 m of trunk inside 500 m), and the AOI was centred on a
+# residential colony. This centre is the nearest real GST Road junction
+# (OSM node 792253820, trunk x residential), 466 m away, so it is the smallest
+# move that puts the corridor and its junctions inside the AOI:
+#
+#                        OLD (12.8231,80.0442)   NEW (12.8261,80.0413)
+#   trunk metres in AOI          334 m                  1038 m
+#   trunk edges kept                 4                      6
+#   junctions in AOI                85                     52
+#   closure candidate            117 m                   498 m
+#
+# (Figures are post-AOI-clip predictions measured from the cached OSM; the
+#  clip itself is applied by netconvert -- see core/build/netconvert.py.)
 BENCHMARK = {
     "name": "GST Road, Chennai",
-    "lat": 12.8231,
-    "lon": 80.0442,
+    "lat": 12.8261,
+    "lon": 80.0413,
     "aoi_radius_m": 500,          # keep small: build time scales with area
 }
 

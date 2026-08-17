@@ -135,7 +135,7 @@ cd Road_Twin
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements-core.txt
-python scripts/selftest.py               # expect 64 passed, 0 failed
+python scripts/selftest.py               # expect 83 passed, 0 failed
 python scripts/verify_environment.py     # expect 0 FAIL
 ```
 
@@ -171,7 +171,7 @@ git push
 
 ## DONE WHEN
 ```
-✓ selftest 64/64          ✓ verify_environment 0 FAIL
+✓ selftest 83/83          ✓ verify_environment 0 FAIL
 ✓ --skip-sim produces network.net.xml + road_network.xodr
 ✓ junctions connected in netedit
 ✓ benchmark OSM committed
@@ -740,7 +740,7 @@ has saved more hackathon projects than any technical decision.
 ✓ installed .exe runs the full benchmark end to end
 ✓ address → confirm → OSM → model → AI → review → accept
   → .xodr → SUMO → closure → metrics → ZIP
-✓ selftest 64/64 · run_benchmark significant == true
+✓ selftest 83/83 · run_benchmark significant == true
 ✓ backup video recorded
 ✓ rehearsed three times
 ✓ a fresh machine can follow the README
@@ -909,4 +909,4 @@ netedit projects\benchmark\sumo\network.net.xml
 ---
 
 **Start now: Phase 0, step 0.1. Do not read further until `selftest.py` shows
-64 passed.**
+83 passed.**

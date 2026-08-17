@@ -92,11 +92,25 @@ def _run(cmd: list[str], label: str) -> str:
 # --------------------------------------------------------------------------
 # stage 1: OSM -> plain XML (+ a first network so you can eyeball it)
 # --------------------------------------------------------------------------
-def osm_to_plain(osm_file: str | Path, build_dir: str | Path) -> dict[str, Path]:
+def osm_to_plain(
+    osm_file: str | Path,
+    build_dir: str | Path,
+    aoi_bbox: tuple[float, float, float, float] | None = None,
+) -> dict[str, Path]:
     """Import OSM and emit the plain-XML substrate.
 
     The typemap is not optional: without it netconvert applies weak defaults for
     lane counts and speeds on Indian road classes, and your baseline is junk.
+
+    `aoi_bbox` is (south, west, north, east) in WGS84 and ENFORCES the AOI.
+
+    Why this is needed (Phase 0 audit): Overpass returns COMPLETE ways that
+    merely touch the query bbox, and `>;` recurses in every node of those ways.
+    A 500 m AOI therefore yielded an extract spanning ~7 km x 5 km, and
+    pick_closure_candidate then selected a 5656 m edge -- nonsense for a 500 m
+    AOI, and slow to simulate. The bbox alone only ever scoped the DOWNLOAD;
+    nothing scoped the BUILD. netconvert's own --keep-edges.in-geo-boundary is
+    the fix: no new dependency, and the AOI radius keeps its documented meaning.
     """
     osm_file = Path(osm_file)
     build_dir = Path(build_dir)
@@ -123,10 +137,22 @@ def osm_to_plain(osm_file: str | Path, build_dir: str | Path) -> dict[str, Path]
         # --- keep only what a car can drive on
         "--keep-edges.by-vclass", "passenger",
         "--remove-edges.isolated",
+        # Clipping at the AOI edge always severs some edges. Without this the
+        # network keeps orphan fragments that no trip can reach, which inflates
+        # the edge count and can hand pick_closure_candidate an unreachable
+        # edge. Keep the single largest connected component.
+        "--keep-edges.components", "1",
         # --- traceability: keeps the OSM way id on the edge as a param
         "--output.original-names",
         "--no-warnings", "false",
     ]
+    if aoi_bbox is not None:
+        south, west, north, east = aoi_bbox
+        # netconvert wants GEODETIC corners as lon-min,lat-min,lon-max,lat-max
+        cmd += ["--keep-edges.in-geo-boundary",
+                f"{west},{south},{east},{north}"]
+        print(f"[netconvert] AOI clip: {west:.5f},{south:.5f},{east:.5f},{north:.5f}")
+
     if typemap.exists():
         cmd[1:1] = ["--type-files", str(typemap)]
     else:

@@ -4,17 +4,41 @@
 > It is the handoff note to your next session and the only place that records
 > what is actually true right now.
 
-**Last updated:** 2026-08-16T11:20 IST  
-**Build version:** 1.0.0 (Production Release)  
-**Active phase:** P9 — PACKAGE & DEMO (COMPLETED · 100% GREEN)
+**Last updated:** 2026-08-18  
+**Build version:** 1.0.0  
+**Active phase:** P0 — GROUND (RE-OPENED after audit; repairs landed, runtime verification blocked)
 
 ---
 
-## LAST VERIFIED END-TO-END
+## CURRENT VERIFIED STATE — this machine, 2026-08-18
+
+Only what has actually been re-run and observed here. Nothing below is inherited.
+
+```
+python scripts/selftest.py            83 passed, 0 failed        VERIFIED
+python scripts/verify_environment.py  4 ok, 3 warn, 5 FAIL       VERIFIED FAILING
+python scripts/run_benchmark.py --skip-sim
+                                      exit 2 at step 3           VERIFIED FAILING
+Benchmark:  GST Road, Chennai  lat=12.8261 lon=80.0413 aoi=500m  (relocated 2026-08-18)
+```
+
+All 5 environment failures have one cause: **SUMO is not installed on this
+machine** (no netconvert, no sumo, no netedit, SUMO_HOME unset). Rust/cargo is
+also absent. These are MACHINE SETUP items, not repository defects.
+
+**NOT verified here:** network.net.xml, road_network.xodr, OpenDRIVE round-trip,
+the AOI clip, the full pipeline, the vision pipeline, the desktop build, the
+installers. All of them require SUMO and/or the Rust toolchain.
+
+---
+
+## HISTORICAL — recorded 2026-08-16 on a DIFFERENT machine, NOT reproduced here
+
+Kept for provenance only. Treat as unverified until re-run on this machine.
 
 ```
 Command:      python scripts/selftest.py
-Result:       78/78 passed  0 failed
+Result:       78/78 passed  0 failed        (suite has since grown to 83)
 Phase 8 Test: python scripts/test_phase8.py -> ALL INVARIANTS PASSED (100%)
 API Test:     python scripts/test_all_endpoints.py -> 14/14 ENDPOINTS PASSED (100%)
 Vision pipe:  .venv-vision\Scripts\python scripts/run_vision.py -> road_mask.geojson, observations.json (PASS)
@@ -22,8 +46,11 @@ OpenDRIVE:    verify_xodr_roundtrip PASS
 Pipeline:     python scripts/run_benchmark.py -> RoadTwin_Project_benchmark.zip (3.5MB, 51 files)
 Desktop:      Vite TS clean build (1179 KB bundle, 0 errors)
 Installers:   RoadTwin_0.1.0_x64_en-US.msi + RoadTwin_0.1.0_x64-setup.exe
-Benchmark:    GST Road, Chennai  lat=12.8231 lon=80.0442 aoi=500m
+Benchmark:    GST Road, Chennai  lat=12.8231 lon=80.0442 aoi=500m  (superseded)
 ```
+
+That pipeline run was made BEFORE the AOI was enforced, so its network extended
+far beyond the 500 m AOI. See the calibration record at the bottom of this file.
 
 ---
 
@@ -59,37 +86,58 @@ Benchmark:    GST Road, Chennai  lat=12.8231 lon=80.0442 aoi=500m
 
 ## IN PROGRESS
 
-- (none — all phases 0 to 9 complete)
+- P0 re-verification. Code repairs landed 2026-08-18; runtime proof still blocked.
 
 ## BROKEN
 
-- (none)
+- **SUMO not installed on this machine** — blocks netconvert, sumo, netedit,
+  `verify_environment.py` (5 FAIL), and `run_benchmark.py` (exit 2 at step 3).
+- **Rust/cargo not installed on this machine** — blocks the Tauri build (P1+).
+- Python here is 3.14.3; project documents 3.11/3.12 and `verify_environment.py`
+  accepts only `>=3.10, <3.14`, so it reports WARN. Selftest passes regardless.
+
+## KNOWN FUTURE ISSUES (do not fix in P0)
+
+- `core/sim/metrics.py` `compare()`: `significant = tt_sd == 0 or ...`. With a
+  single seed `aggregate()` sets sd to 0.0, so ANY delta — even 0.0% — is
+  reported significant. `SETUP.md` recommends `--seeds 1`. Belongs to P5/P6.
 
 ## NEXT
 
-- Final submission and rehearsal per `context/DEMO_SPEC.md`
-
-
-- Push Phase 1 to branch `phase/1-shipping`
+- Install SUMO + set SUMO_HOME, then re-run `verify_environment.py` and
+  `run_benchmark.py --skip-sim` to prove the AOI clip and the .xodr round-trip.
+- Fill the verification block in `context/DEMO_SPEC.md` from that run.
+- Only then consider P1.
 
 ---
 
 ## ENVIRONMENT
 
+Measured on this machine 2026-08-18. Do not copy figures in from another box.
+
 ```
-Python:   3.14.3 (system venv at .venv)
-Node:     v24.14.0
-Rust:     1.97.1 (rustup, MSVC x64)
-SUMO:     1.27.1 at C:\Program Files (x86)\Eclipse\Sumo (SUMO_HOME set)
-Git:      2.53.0
-GitHub:   Yash-7788 (authenticated)
+Python:   3.14.3 (.venv, from C:\Python314)   WARN: outside documented 3.11/3.12
+Node:     v24.14.0        npm 11.9.0
+Rust:     NOT INSTALLED   (no cargo on PATH, no ~/.cargo, no winget entry)
+SUMO:     NOT INSTALLED   (SUMO_HOME unset; no netconvert/sumo/netedit anywhere)
+MSVC:     Visual Studio Build Tools 2026 v18.4.0   (docs say 2022)
+WebView2: Runtime 151.0.4129.86
+Git:      2.50.1.windows.1
 Repo:     https://github.com/nagasaipradhyumnapoola/Road_Twin.git
-Branch:   phase/1-shipping
+Branch:   phase/0-ground
 ```
 
 ---
 
-## CALIBRATION RECORD
+## CALIBRATION RECORD — STALE, superseded 2026-08-18
+
+Recorded before the AOI was enforced and before the benchmark was relocated.
+`actual closed length = 5656.1m` inside a "500 m AOI" is the symptom that
+exposed the missing clip: Overpass returned whole ways, nothing clipped the
+build, so the closure landed on a 5.7 km edge. Also note the delta is +1.0% —
+within seed noise, i.e. this was never a demo-ready result.
+
+Re-calibrate from scratch once SUMO is installed. Do not reuse these numbers.
 
 ```
 SIM.period            = 0.8
@@ -97,7 +145,7 @@ vehicles generated    = 4500
 baseline travel time  = 340.5s
 closure edge          = 47572742#0
 closure lane index    = 3
-actual closed length  = 5656.1m
+actual closed length  = 5656.1m          <- 11x the AOI diameter; invalid
 closure travel time   = 344.0s
-delta travel time     = +1.0% (seed noise baseline — calibrate on Day 3)
+delta travel time     = +1.0% (within seed noise — NOT a result)
 ```

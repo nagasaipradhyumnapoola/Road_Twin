@@ -54,7 +54,7 @@ roadtwin-kit/
 │
 ├── scripts/
 │   ├── verify_environment.py   ★ Day 0 gate
-│   ├── selftest.py             ★ 64 tests, no SUMO or network needed
+│   ├── selftest.py             ★ 83 tests, no SUMO or network needed
 │   └── run_benchmark.py        ★ headless end-to-end — THE regression test
 │
 └── notebooks/
@@ -72,7 +72,7 @@ python -m venv .venv && .venv\Scripts\activate     # Windows
 pip install -r requirements-core.txt
 
 # 2. Run test suites
-python scripts/selftest.py            # 78 unit tests, ~2s, no SUMO needed
+python scripts/selftest.py            # 83 unit tests, ~2s, no SUMO needed
 python scripts/test_all_endpoints.py  # 14 FastAPI endpoints tested live
 python scripts/verify_environment.py  # checks SUMO, tools, network, cache
 python scripts/run_benchmark.py       # full pipeline end-to-end benchmark
@@ -96,7 +96,7 @@ npm run tauri dev
 python scripts/selftest.py
 ```
 
-78 tests covering the logic that is easy to get subtly and silently wrong:
+83 tests covering the logic that is easy to get subtly and silently wrong:
 tile georeferencing, lane-count evidence, SUMO output parsing, plain-XML edits,
 closure scenario generation, export packaging. No SUMO and no network required.
 

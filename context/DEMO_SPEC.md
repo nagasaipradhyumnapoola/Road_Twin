@@ -8,9 +8,12 @@ The exact thing that must work, in the exact order it will be shown.
 
 ```
 Location        (set in config.py BENCHMARK)
-Default         GST Road, Chennai — 12.8231, 80.0442
-AOI radius      500 m
+Default         GST Road, Chennai — 12.8261, 80.0413
+AOI radius      500 m            (ENFORCED by netconvert --keep-edges.in-geo-boundary)
 ```
+
+> Relocated 2026-08-18. The old centre (12.8231, 80.0442) sat 462 m from GST
+> Road, so the corridor only clipped the AOI corner.
 
 ### Day 0 verification — do this before anything is built
 
@@ -27,12 +30,21 @@ the plan.** Ten minutes of relocating beats two days of fighting bad data.
 Record the verified values here:
 
 ```
-verified on       (date)
-main road         (name / OSM way id)
-lanes tag         (value, or "absent -> inferred")
-junction          (present? signalised?)
-closure edge      (id, lanes, length)
+verified on       2026-08-18  (PARTIAL — OSM extract only, netconvert BLOCKED: no SUMO)
+main road         Grand Southern Trunk Road — OSM ways 47572742, 95222417,
+                  568057022, 1080757453
+lanes tag         lanes=4, explicit on all four trunk ways        CONFIRMED
+maxspeed          ABSENT on all 86 drivable ways -> class default WARN
+junction          present: 52 junction nodes inside the AOI, 6 on the trunk.
+                  NO traffic_signals node inside the AOI          UNSIGNALISED
+closure edge      predicted way 95222417, 4 lanes, ~498 m         NOT YET BUILT
 ```
+
+Still unverified — needs SUMO, then netedit / satellite imagery:
+
+- [ ] netconvert produces a connected network (open it in netedit and look)
+- [ ] lane markings clearly visible in satellite imagery at zoom 19
+- [ ] actual closure-edge id and length from the built network
 
 ---
 

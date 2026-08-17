@@ -492,6 +492,39 @@ def test_geometry():
             check("unknown edge raises", True)
 
 
+def test_phase0_gate():
+    section("scripts/run_benchmark.py  -- the Phase 0 --skip-sim gate")
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "_rb", ROOT / "scripts" / "run_benchmark.py")
+    rb = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rb)
+
+    # Phase 0's claim is "--skip-sim produced a VALID .xodr". run_benchmark used
+    # to compute the round-trip result, print it, and return 0 regardless -- so
+    # a broken OpenDRIVE export still read as a green gate. Lock that shut.
+    check("round-trip PASS -> exit 0", rb.skip_sim_exit_code(True) == 0)
+    check("round-trip FAIL -> non-zero exit",
+          rb.skip_sim_exit_code(False) != 0,
+          f"got {rb.skip_sim_exit_code(False)}")
+    check("a failed round-trip can never be reported as success",
+          rb.skip_sim_exit_code(False) != rb.skip_sim_exit_code(True))
+
+    # The AOI clip is a netconvert CLI flag, so it cannot be exercised without
+    # SUMO. What IS pure logic, and easy to get silently backwards, is the
+    # coordinate ORDER: bbox is (south, west, north, east) but netconvert wants
+    # lon-min,lat-min,lon-max,lat-max. Swapping them clips an empty region.
+    from core.acquire.overpass import bbox_from_point
+    south, west, north, east = bbox_from_point(12.8261, 80.0413, 500)
+    check("AOI bbox brackets the requested centre",
+          south < 12.8261 < north and west < 80.0413 < east,
+          f"({south:.5f},{west:.5f},{north:.5f},{east:.5f})")
+    check("geo-boundary string is lon,lat,lon,lat -- not lat,lon",
+          f"{west},{south},{east},{north}".split(",")[0].startswith("80."),
+          f"{west:.5f},{south:.5f},{east:.5f},{north:.5f}")
+
+
 def test_export():
     section("core/export/package.py  -- the deliverable")
     from core.export.package import export_project, write_readme
@@ -531,6 +564,7 @@ def main() -> int:
     test_edits()
     test_scenario()
     test_geometry()
+    test_phase0_gate()
     test_export()
     print("\n" + "=" * 72)
     print(f"{PASS} passed, {FAIL} failed")
