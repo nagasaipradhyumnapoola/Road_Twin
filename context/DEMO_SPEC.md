@@ -83,7 +83,7 @@ projects/benchmark/
 | 9 | Click ACCEPT | "The engineer decides. Not the model." | — |
 | 10 | Model + .xodr regenerate | "One edit, and the network and the OpenDRIVE both recompile." | — |
 | 11 | Run the experiment | "Same network, same demand, same seeds. Only the closure differs." | — |
-| 12 | Metrics table | "Travel time up 34%. That is causal, not noise — five seeds." | Numbers must be live |
+| 12 | Metrics table | "Across 20 matched seeds, the closure increased travel time on 18 of 20 runs. Paired mean about +16.8s. Five of the twenty tipped into network breakdown." | Numbers must be live -- quote what the run actually shows, not these |
 | 13 | Export ZIP | "Everything, with a provenance chain from OSM tag to result." | Open the zip and show the files |
 
 ### The single most important moment
@@ -96,16 +96,77 @@ decorative. Rehearse that transition specifically.
 
 ## Expected result shape
 
+Calibrated 2026-08-18 on this benchmark network. `SIM.period = 3.0`
+(1200 vehicles over 3600 s), 20 seeds (42-61), closure on the edge chosen
+automatically by `pick_closure_candidate()` -- currently `95222417#0`, a
+4-lane / 477 m GST Road trunk edge with upstream and downstream connectivity.
+
+### How significance is decided
+
+**The test is PAIRED.** Baseline and closure share the same network, the same
+`routes.rou.xml` and the same seed list; only the closure differs. Seed 46's
+closure run is therefore the same traffic as seed 46's baseline run, so the
+two arms are matched, not independent samples. `compare()` computes the
+per-seed difference and runs a two-sided one-sample t-test on those
+differences at the 95% level: **significant when the confidence interval for
+the mean difference excludes zero.**
+
+This replaced an unpaired rule (`|delta| > 2 x max(baseline_sd, closure_sd)`).
+That rule asked the wrong question of a matched design, and on this network it
+failed in a specific way: the closure is what *creates* the between-seed
+spread, so the harder the closure bit, the larger `closure_sd`, and the harder
+the rule became to satisfy. Removing a measurement bias and recovering
+censored vehicles pushed it *further* from passing. The paired test is not a
+lower bar -- it reports a significant *speed-up* just as readily, and
+`run_benchmark.py` treats that as a failure too, because a closure that makes
+a network faster means the baseline is gridlocked or the closed edge is a
+fringe entry edge.
+
+The unpaired rule is retained as a fallback for aggregates with no per-seed
+data (a single seed, or hand-built dicts).
+
+### Two regimes, reported separately
+
+The closure response on this network is **bimodal**, so a single mean is not an
+honest summary and the benchmark does not present one alone:
+
 ```
-                        BASELINE      CLOSURE      DELTA
-Average travel time        42.1s        56.4s      +34.0%
-Queue length               18.2m        47.6m     +161.5%
-Completed vehicles           102           97       -4.9%
-mean of 5 seeds | Closure produced a change larger than seed-to-seed variation.
+BREAKDOWN   ~25% of seeds   network mean speed collapses to ~0.4x baseline,
+                            tens of vehicles unfinished at the horizon
+NORMAL      ~75% of seeds   closure absorbed, median travel time +~6%
 ```
 
-Numbers will differ. **If the delta is not significant, the demo is not ready** —
-lower `SIM.period` in config.py and re-run. Do not present noise as a finding.
+Breakdown is counted by a *relative* criterion -- closure network mean speed
+below half its own baseline -- so it transfers across networks instead of
+encoding an m/s threshold fitted to this one. On this benchmark the regimes
+separate cleanly (breakdown 0.33-0.40 of baseline speed, normal 0.81-0.97,
+nothing between).
+
+The honest headline is therefore a **probability plus a conditional severity**,
+not a percentage:
+
+> Closing one of four lanes caused network-wide breakdown in ~25% of runs; in
+> the rest the network absorbed it with a median ~6% travel-time increase.
+
+### Numbers are network-specific
+
+Any figure here is what *this* benchmark measured, not a property of the
+method. It moves with location, AOI, demand and seed set. An earlier draft of
+this file quoted +34% travel time and +161% queue as the "expected" shape;
+those were illustrative, were never measured here, and are not reachable on a
+193-edge network with one usable multi-lane corridor. They were removed so
+nobody tunes toward them.
+
+Two things to know when reading a run:
+
+- **Queue length is filtered to the closed edge**, so it normally *falls* under
+  closure -- a lane is gone, so fewer vehicles can queue there. Congestion
+  moves upstream, where this metric does not look. Read travel time instead.
+- **Vehicles still running at the horizon are censored.** They never enter
+  `tripinfo.xml`, so the travel-time mean omits exactly the worst-affected
+  trips, and it does so hardest in breakdown runs. The breakdown block reports
+  the unfinished count for this reason. Raising `SIM.end` to 7200 s drains the
+  network and removes the censoring entirely.
 
 ---
 

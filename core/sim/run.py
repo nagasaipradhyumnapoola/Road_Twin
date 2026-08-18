@@ -82,7 +82,9 @@ def run_scenario(
         run_once(net_file, routes_file, d, seed=s, begin=begin, end=end,
                  additional=additional)
         runs.append(M.collect_run(d, edge_filter=edge_filter))
-    agg = M.aggregate(runs)
+    # Pass seeds so the per-seed values survive aggregation -- compare() pairs
+    # baseline and closure by seed, and cannot do that from means alone.
+    agg = M.aggregate(runs, seeds=seeds)
     agg["label"] = label
     warnings = [r["_warning"] for r in runs if r.get("_warning")]
     if warnings:

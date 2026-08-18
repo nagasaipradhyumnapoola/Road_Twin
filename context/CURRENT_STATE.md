@@ -96,11 +96,18 @@ far beyond the 500 m AOI. See the calibration record at the bottom of this file.
 - Python here is 3.14.3; project documents 3.11/3.12 and `verify_environment.py`
   accepts only `>=3.10, <3.14`, so it reports WARN. Selftest passes regardless.
 
-## KNOWN FUTURE ISSUES (do not fix in P0)
+## KNOWN FUTURE ISSUES
 
-- `core/sim/metrics.py` `compare()`: `significant = tt_sd == 0 or ...`. With a
-  single seed `aggregate()` sets sd to 0.0, so ANY delta — even 0.0% — is
-  reported significant. `SETUP.md` recommends `--seeds 1`. Belongs to P5/P6.
+- ~~`core/sim/metrics.py` `compare()` reports an empty simulation as
+  significant~~ — **FIXED 2026-08-18 (P5 calibration repair).** `compare()` now
+  returns `significant = False` when either side has no `avg_travel_time_s`.
+  Covered by two selftest checks. The single-seed case (`tt_sd == 0` with real
+  data) is unchanged and still treats a lone seed as significant — use >= 2
+  seeds.
+- Not fixed, tracked separately: F3 (OpenDRIVE round-trip not gated in a full
+  run), F1 (`provenance.json` accumulates stale records), queue metric filtered
+  to the closed edge only, teleport rise under closure, ~635 MB of `queue.xml`
+  left per benchmark run.
 
 ## NEXT
 
@@ -129,23 +136,73 @@ Branch:   phase/0-ground
 
 ---
 
-## CALIBRATION RECORD — STALE, superseded 2026-08-18
+## CALIBRATION RECORD
 
-Recorded before the AOI was enforced and before the benchmark was relocated.
-`actual closed length = 5656.1m` inside a "500 m AOI" is the symptom that
-exposed the missing clip: Overpass returned whole ways, nothing clipped the
-build, so the closure landed on a 5.7 km edge. Also note the delta is +1.0% —
-within seed noise, i.e. this was never a demo-ready result.
-
-Re-calibrate from scratch once SUMO is installed. Do not reuse these numbers.
+Calibrated 2026-08-18. All figures from real SUMO output over the default
+20 seeds (42-61); nothing tuned toward a target.
 
 ```
-SIM.period            = 0.8
-vehicles generated    = 4500
-baseline travel time  = 340.5s
-closure edge          = 47572742#0
-closure lane index    = 3
-actual closed length  = 5656.1m          <- 11x the AOI diameter; invalid
-closure travel time   = 344.0s
-delta travel time     = +1.0% (within seed noise — NOT a result)
+SIM.period            = 3.0            (was 0.8)
+SIM.seeds             = 42..61         (20 seeds, was 5)
+vehicles generated    = 1200
+closure edge          = chosen by pick_closure_candidate() -> 95222417#0
+                        (4 lanes, 477 m, 2 upstream + 2 downstream, GST Road)
+
+PAIRED EFFECT   mean +16.79 s   95% CI [+4.15, +29.42] s
+                t = 2.78 vs t_crit 2.093 (n=20)   significant = TRUE
+                18/20 seeds positive
+BREAKDOWN       5/20 = 25% of seeds  [46, 48, 52, 59, 60]
+  when it breaks    93.1s -> 138.6s (+48.9%), 38 teleports, 64 unfinished
+  when it does not  86.7s -> 93.9s  (+8.3%),  n=15
+arm means       baseline 88.3 s (sd 10.35)   closure 105.1 s (sd 28.43)
+run_benchmark.py exit code = 0
 ```
+
+**The headline is a probability plus a severity, not one percentage.** Closing
+one of four lanes broke the network down in ~25% of runs; in the other 75% the
+network absorbed it with a median ~6% travel-time rise. The +19.0% arm-mean is
+a heavy-tailed average across both regimes and should not be quoted alone.
+
+### Significance method
+
+Paired two-sided t-test on per-seed differences at 95%, because the experiment
+is paired by construction -- same network, same routes, same seeds, closure the
+only difference. See `paired_effect()` in `core/sim/metrics.py` and the
+"Expected result shape" section of `DEMO_SPEC.md`.
+
+The previous unpaired rule (`|delta| > 2 x max(baseline_sd, closure_sd)`)
+returned significant = FALSE on the same data. It asked an unmatched question
+of a matched design, and because the closure itself produces the between-seed
+spread, it grew *harder* to satisfy as the closure effect was measured more
+accurately. The unpaired rule is retained as a fallback where no per-seed data
+exists. `run_benchmark.py` now also fails on a significant *speed-up*, which
+signals a gridlocked baseline or a fringe closure edge rather than a result.
+
+### Why period 0.8 was wrong
+
+It gridlocked the benchmark: 4500 vehicles, 19.8% completion, ~490 teleports
+per run, mean speed 0.07 m/s. Against that jam the closure *reduced* travel
+time by 1.6%, because the old closure edge (`568057022#0`) is a fringe ENTRY
+edge with zero upstream connections, so closing a lane metered inflow instead
+of obstructing flow. Both faults are fixed.
+
+Demand sweep behind the choice (baseline only, 2 seeds):
+
+```
+period  vehicles  completed  teleports  speed     classification
+  0.8      4500      19.8%       ~490   0.07 m/s  GRIDLOCKED
+  1.5      2400      71.3%         60   4.76 m/s  HEAVY BUT USABLE
+  2.0      1800      93.0%         20   7.98 m/s  GOOD
+  3.0      1200      98.0%          2  11.81 m/s  GOOD      <- chosen
+  4.0       900      98.3%          0  12.57 m/s  TOO LIGHT
+  6.0       600      98.1%          0  12.73 m/s  TOO LIGHT
+```
+
+### Known measurement caveat (not fixed)
+
+`SIM.end` is 3600 s. In breakdown runs ~64 vehicles are still driving at the
+horizon; they never enter `tripinfo.xml`, so the travel-time mean omits the
+worst-affected trips — hardest in exactly the runs where the closure bites
+most. A controlled 7200 s check showed the network fully drains and the paired
+mean rises from +16.79 s to +22.77 s. The breakdown block reports the
+unfinished count so the censoring is visible.

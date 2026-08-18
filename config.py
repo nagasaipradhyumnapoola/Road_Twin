@@ -58,9 +58,16 @@ SIM = {
     # randomTrips --period. LOWER = MORE traffic.
     # Day 3 task: tune this until the corridor sits at ~75-85% of capacity.
     # If you skip this, the lane closure will change nothing and the demo dies.
-    "period": 0.8,
+    "period": 3.0,
     "fringe_factor": 10,          # bias trips to enter/leave at network edges
-    "seeds": [42, 43, 44, 45, 46],
+    # 20 seeds, not 5. The closure response on this network is BIMODAL: about
+    # a quarter of seeds tip into network-wide breakdown and the rest absorb
+    # the closure. Five seeds cannot resolve that -- the expected number of
+    # breakdowns in five draws is ~1.25, so a 5-seed run lands anywhere from
+    # 0 to 3 and the mean swings (5 seeds gave +24.5%, 20 seeds gave +19.0%).
+    # The paired test also needs degrees of freedom: t_crit falls from 2.776
+    # at n=5 to 2.093 at n=20. Costs ~80 s.
+    "seeds": list(range(42, 62)),
 }
 
 CLOSURE = {

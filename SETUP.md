@@ -98,7 +98,7 @@ Run all verification suites in order:
 # 1. Environment Health Check (checks SUMO, tools, cache)
 python scripts/verify_environment.py
 
-# 2. 83 Mathematical & Logic Unit Tests (No SUMO/network needed, ~2s)
+# 2. 112 Mathematical & Logic Unit Tests (No SUMO/network needed, ~2s)
 python scripts/selftest.py
 
 # 3. 14 API Endpoints & Replay Invariants Integration Test
@@ -107,7 +107,13 @@ python scripts/test_all_endpoints.py
 # 4. Phase 8 Replay Audit Invariant Test
 python scripts/test_phase8.py
 
-# 5. Full Headless Benchmark Pipeline (Overpass -> netconvert -> SUMO simulation -> ZIP)
+# 5. Full Headless Benchmark (Overpass -> netconvert -> SUMO -> ZIP)
+python scripts/run_benchmark.py
+
+# 5b. SMOKE TEST ONLY -- one seed, ~10 s. Proves the pipeline runs end to end.
+#     It is NOT a benchmark: a single run has no spread, so run_benchmark
+#     refuses any significance claim and exits non-zero by design. Never quote
+#     its numbers.
 python scripts/run_benchmark.py --seeds 1 --offline
 
 # 6. Vision Pipeline (Overhead Mosaic -> SAM 2.1 Segment -> Width Measurement)

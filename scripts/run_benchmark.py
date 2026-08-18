@@ -201,9 +201,22 @@ def main() -> int:
     print(f"\n{'='*70}")
     print(f"DONE in {time.time()-t_all:.1f}s   ->  {zp}")
     print(f"{'='*70}")
-    if not result["comparison"]["significant"]:
-        print("\n!! The closure did not move the metrics beyond seed noise.")
-        print("   Lower SIM['period'] in config.py and re-run. Do not demo this.")
+    cmp = result["comparison"]
+    pa = cmp.get("paired") or {}
+    if not cmp["significant"]:
+        print()
+        print("!! The closure effect is not separable from seed noise.")
+        print(f"   {cmp['verdict']}")
+        print("   Add seeds, lower SIM['period'], or pick a more critical edge.")
+        return 1
+    if pa and pa.get("direction") == "decrease":
+        # A statistically significant SPEED-UP is not a passing result. It
+        # means the baseline is gridlocked and the closure is metering inflow,
+        # or the closed edge is a fringe entry edge -- both invalidate the
+        # experiment rather than confirming it.
+        print()
+        print("!! The closure made the network FASTER, significantly.")
+        print(f"   {cmp['verdict']}")
         return 1
     return 0
 
