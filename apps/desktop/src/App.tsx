@@ -58,6 +58,26 @@ export default function App() {
   const [twinState, setTwinState]   = useState<TwinState>("IDLE");
 
   useEffect(() => {
+    const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+    if (!isTauri) {
+      const port = 8765;
+      fetchHealth(port)
+        .then(async () => {
+          window.__rtPort = port;
+          setSidecar({ kind: "ready", port });
+          setCheckingLoc(true);
+          const loc = await fetchLocation(port);
+          setLocation(loc);
+          setTwinState(loc ? "IDLE" : "LOCATING");
+          setCheckingLoc(false);
+        })
+        .catch((e) => {
+          setSidecar({ kind: "error", message: `Cannot connect to backend on port ${port}: ${e}` });
+          setTwinState("FAILED");
+        });
+      return;
+    }
+
     const unlistenReady = listen<number>("sidecar-ready", async ({ payload: port }) => {
       try {
         await fetchHealth(port);
@@ -120,10 +140,13 @@ export default function App() {
     return (
       <div className="shell">
         <Topbar state="LOCATING" tagClass="badge-locating" />
-        <LocationGateway onConfirmed={(loc) => {
-          setLocation(loc);
-          setTwinState("IDLE");
-        }} />
+        <LocationGateway
+          port={sidecar.kind === "ready" ? sidecar.port : 8765}
+          onConfirmed={(loc) => {
+            setLocation(loc);
+            setTwinState("IDLE");
+          }}
+        />
       </div>
     );
   }

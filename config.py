@@ -83,7 +83,7 @@ CLOSURE = {
 IMAGERY = {
     "zoom": 19,
     "tile_url": os.environ.get("ROADTWIN_TILE_URL", ""),
-    "user_agent": "RoadTwin/0.1 (SIH95; contact: you@example.com)",
+    "user_agent": "RoadTwin-Desktop/0.2.0 (Windows; SIH-DigitalTwin)",
     "max_tiles": 64,              # guard against accidental huge fetches
 }
 
@@ -106,6 +106,6 @@ VISION = {
 # ---------------------------------------------------------------------------
 OVERPASS = {
     "endpoint": "https://lz4.overpass-api.de/api/interpreter",
-    "user_agent": "RoadTwin/0.1 (SIH95; contact: you@example.com)",
+    "user_agent": "RoadTwin-Desktop/0.2.0 (Windows; SIH-DigitalTwin)",
     "timeout_s": 90,
 }

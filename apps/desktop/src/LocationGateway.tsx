@@ -2,8 +2,29 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import * as maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 
-// API base pulled from window — set by App when sidecar is ready
-const API = () => `http://127.0.0.1:${(window as unknown as { __rtPort?: number }).__rtPort ?? 8765}`;
+// Reliable OSM raster style specification (works offline/online, no vector font dependencies)
+const OSM_STYLE: maplibregl.StyleSpecification = {
+  version: 8,
+  sources: {
+    "osm-tiles": {
+      type: "raster",
+      tiles: [
+        "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+      ],
+      tileSize: 256,
+      attribution: "© OpenStreetMap contributors",
+    },
+  },
+  layers: [
+    {
+      id: "osm-tiles-layer",
+      type: "raster",
+      source: "osm-tiles",
+      minzoom: 0,
+      maxzoom: 19,
+    },
+  ],
+};
 
 interface Candidate {
   display_name: string;
@@ -21,10 +42,14 @@ interface LocationState {
 }
 
 interface LocationGatewayProps {
+  port?: number;
   onConfirmed: (loc: LocationState) => void;
 }
 
-export function LocationGateway({ onConfirmed }: LocationGatewayProps) {
+export function LocationGateway({ port, onConfirmed }: LocationGatewayProps) {
+  const activePort = port ?? (window as unknown as { __rtPort?: number }).__rtPort ?? 8765;
+  const API = `http://127.0.0.1:${activePort}`;
+
   // Search
   const [query, setQuery]           = useState("");
   const [candidates, setCandidates] = useState<Candidate[]>([]);
@@ -35,7 +60,7 @@ export function LocationGateway({ onConfirmed }: LocationGatewayProps) {
   const [lat, setLat]               = useState(12.8231);
   const [lon, setLon]               = useState(80.0442);
   const [radius, setRadius]         = useState(500);
-  const [siteName, setSiteName]     = useState("GST Road, Chennai");
+  const [siteName, setSiteName]     = useState("");
 
   // Manual coord inputs (string to allow partial edit)
   const [latStr, setLatStr]         = useState("12.8231");
@@ -51,40 +76,62 @@ export function LocationGateway({ onConfirmed }: LocationGatewayProps) {
   const markerRef   = useRef<maplibregl.Marker | null>(null);
   const circleRef   = useRef<maplibregl.GeoJSONSource | null>(null);
 
+  // ── parse manual inputs safely ───────────────────────────────────────────
+  const parseManual = useCallback((): { valid: boolean; lat: number; lon: number } => {
+    const lt = parseFloat(latStr.trim());
+    const lg = parseFloat(lonStr.trim());
+    if (isNaN(lt) || isNaN(lg) || lt < -90 || lt > 90 || lg < -180 || lg > 180) {
+      return { valid: false, lat, lon };
+    }
+    return { valid: true, lat: lt, lon: lg };
+  }, [latStr, lonStr, lat, lon]);
+
   // ── initialise map once ──────────────────────────────────────────────────
   useEffect(() => {
     if (!mapRef.current || mapObj.current) return;
 
-    const map = new maplibregl.Map({
-      container: mapRef.current,
-      // OpenFreeMap — no API key required, open-access
-      style: "https://tiles.openfreemap.org/styles/liberty",
-      center: [lon, lat],
-      zoom: 15,
-    });
+    let map: maplibregl.Map;
+    try {
+      map = new maplibregl.Map({
+        container: mapRef.current,
+        style: OSM_STYLE,
+        center: [lon, lat],
+        zoom: 15,
+        minZoom: 4,
+        maxZoom: 19,
+      });
+    } catch (e) {
+      console.error("Map initialization error:", e);
+      return;
+    }
 
     map.addControl(new maplibregl.NavigationControl(), "top-right");
     map.addControl(new maplibregl.ScaleControl(), "bottom-left");
 
+    const setupLayers = () => {
+      if (!map.getSource("aoi-circle")) {
+        map.addSource("aoi-circle", {
+          type: "geojson",
+          data: buildCircleGeoJSON(lat, lon, radius),
+        });
+        map.addLayer({
+          id: "aoi-fill",
+          type: "fill",
+          source: "aoi-circle",
+          paint: { "fill-color": "#3b82f6", "fill-opacity": 0.08 },
+        });
+        map.addLayer({
+          id: "aoi-outline",
+          type: "line",
+          source: "aoi-circle",
+          paint: { "line-color": "#3b82f6", "line-width": 1.5, "line-dasharray": [4, 3] },
+        });
+        circleRef.current = map.getSource("aoi-circle") as maplibregl.GeoJSONSource;
+      }
+    };
+
     map.on("load", () => {
-      // AOI circle source
-      map.addSource("aoi-circle", {
-        type: "geojson",
-        data: buildCircleGeoJSON(lat, lon, radius),
-      });
-      map.addLayer({
-        id: "aoi-fill",
-        type: "fill",
-        source: "aoi-circle",
-        paint: { "fill-color": "#3b82f6", "fill-opacity": 0.08 },
-      });
-      map.addLayer({
-        id: "aoi-outline",
-        type: "line",
-        source: "aoi-circle",
-        paint: { "line-color": "#3b82f6", "line-width": 1.5, "line-dasharray": [4, 3] },
-      });
-      circleRef.current = map.getSource("aoi-circle") as maplibregl.GeoJSONSource;
+      setupLayers();
 
       // Draggable marker
       const el = document.createElement("div");
@@ -105,13 +152,52 @@ export function LocationGateway({ onConfirmed }: LocationGatewayProps) {
       updateCoords(e.lngLat.lat, e.lngLat.lng, "click");
     });
 
+    // Resize observer for flex containers
+    const resizeObserver = new ResizeObserver(() => {
+      map.resize();
+    });
+    if (mapRef.current) {
+      resizeObserver.observe(mapRef.current);
+    }
+
+    setTimeout(() => map.resize(), 150);
+    setTimeout(() => map.resize(), 500);
+
     mapObj.current = map;
-    return () => { map.remove(); mapObj.current = null; };
+    return () => {
+      resizeObserver.disconnect();
+      map.remove();
+      mapObj.current = null;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ── sync marker + circle when coords change externally ───────────────────
-  const updateCoords = useCallback((lt: number, lg: number, _src: string) => {
+  // ── reverse geocoding on drag / click / manual ──────────────────────────
+  const revTimer = useRef<number | null>(null);
+
+  const fetchReverseName = useCallback((lt: number, lg: number) => {
+    if (revTimer.current) clearTimeout(revTimer.current);
+    revTimer.current = window.setTimeout(async () => {
+      try {
+        const r = await fetch(`${API}/location/reverse`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ lat: lt, lon: lg }),
+        });
+        if (r.ok) {
+          const d = await r.json();
+          if (d && d.display_name) {
+            setSiteName(d.display_name);
+          }
+        }
+      } catch {
+        // silent fallback
+      }
+    }, 350);
+  }, [API]);
+
+  // ── sync marker + circle when coords change ──────────────────────────────
+  const updateCoords = useCallback((lt: number, lg: number, src: string) => {
     setLat(lt);
     setLon(lg);
     setLatStr(lt.toFixed(6));
@@ -119,12 +205,20 @@ export function LocationGateway({ onConfirmed }: LocationGatewayProps) {
     markerRef.current?.setLngLat([lg, lt]);
     circleRef.current?.setData(buildCircleGeoJSON(lt, lg, radius));
     mapObj.current?.easeTo({ center: [lg, lt], duration: 300 });
-  }, [radius]);
+    if (src === "drag" || src === "click" || src === "manual") {
+      fetchReverseName(lt, lg);
+    }
+  }, [radius, fetchReverseName]);
 
   // update circle on radius change
   useEffect(() => {
     circleRef.current?.setData(buildCircleGeoJSON(lat, lon, radius));
   }, [radius, lat, lon]);
+
+  // initial reverse geocode on load
+  useEffect(() => {
+    fetchReverseName(lat, lon);
+  }, [fetchReverseName]);
 
   // ── geocode ──────────────────────────────────────────────────────────────
   async function doSearch() {
@@ -133,7 +227,7 @@ export function LocationGateway({ onConfirmed }: LocationGatewayProps) {
     setSearchErr("");
     setCandidates([]);
     try {
-      const r = await fetch(`${API()}/location/geocode`, {
+      const r = await fetch(`${API}/location/geocode`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ query: query.trim() }),
@@ -162,17 +256,14 @@ export function LocationGateway({ onConfirmed }: LocationGatewayProps) {
 
   // ── manual coord commit ──────────────────────────────────────────────────
   function commitManual() {
-    const lt = parseFloat(latStr);
-    const lg = parseFloat(lonStr);
-    if (isNaN(lt) || isNaN(lg)) return;
-    if (lt < -90 || lt > 90 || lg < -180 || lg > 180) return;
-    updateCoords(lt, lg, "manual");
-    mapObj.current?.flyTo({ center: [lg, lt], zoom: 15, duration: 700 });
+    const { valid, lat: parsedLat, lon: parsedLon } = parseManual();
+    if (!valid) return;
+    updateCoords(parsedLat, parsedLon, "manual");
+    mapObj.current?.flyTo({ center: [parsedLon, parsedLat], zoom: 15, duration: 700 });
   }
 
   // ── open in maps ─────────────────────────────────────────────────────────
   async function openInMaps() {
-    // Tauri 2 uses tauri-plugin-opener — NOT shell.open
     try {
       const { openUrl } = await import("@tauri-apps/plugin-opener");
       await openUrl(`https://www.openstreetmap.org/?mlat=${lat}&mlon=${lon}&zoom=15`);
@@ -185,13 +276,19 @@ export function LocationGateway({ onConfirmed }: LocationGatewayProps) {
   async function confirmLocation() {
     setConfirming(true);
     setConfirmErr("");
+
+    const parsed = parseManual();
+    const finalLat = parsed.valid ? parsed.lat : lat;
+    const finalLon = parsed.valid ? parsed.lon : lon;
+
     try {
-      const r = await fetch(`${API()}/location/confirm`, {
+      const r = await fetch(`${API}/location/confirm`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          name: siteName || `${lat.toFixed(4)}, ${lon.toFixed(4)}`,
-          lat, lon,
+          name: siteName.trim() || `${finalLat.toFixed(4)}, ${finalLon.toFixed(4)}`,
+          lat: finalLat,
+          lon: finalLon,
           aoi_radius_m: radius,
           confirmation_method: "user",
         }),
@@ -341,3 +438,4 @@ function buildCircleGeoJSON(lat: number, lon: number, radiusM: number) {
     }],
   };
 }
+

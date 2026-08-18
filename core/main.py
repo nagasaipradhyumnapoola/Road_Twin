@@ -68,6 +68,11 @@ class GeocodeRequest(BaseModel):
     query: str
 
 
+class ReverseGeocodeRequest(BaseModel):
+    lat: float
+    lon: float
+
+
 class GeocandiDate(BaseModel):
     display_name: str
     lat: float
@@ -197,6 +202,21 @@ def geocode(body: GeocodeRequest) -> list[GeocandiDate]:
         return [GeocandiDate(**r) for r in results]
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.post("/location/reverse")
+def reverse_geocode_endpoint(body: ReverseGeocodeRequest) -> dict:
+    """Lat/Lon → display name via Nominatim reverse geocode."""
+    try:
+        from core.acquire.geocoder import reverse_geocode as _rev_geo
+        from config import OVERPASS, ASSETS
+        cache_dir = ASSETS / "geocache"
+        res = _rev_geo(body.lat, body.lon, user_agent=OVERPASS["user_agent"], cache_dir=cache_dir)
+        if res and res.get("display_name"):
+            return res
+        return {"display_name": "", "lat": body.lat, "lon": body.lon}
+    except Exception:
+        return {"display_name": "", "lat": body.lat, "lon": body.lon}
 
 
 @app.post("/location/confirm")
@@ -506,11 +526,23 @@ def run_experiment_endpoint(body: ExperimentRequest) -> dict:
 
 # ── Vision Endpoints (Phase 7) ────────────────────────────────────────────────
 
+def _get_vision_python() -> Path | None:
+    candidates = [
+        _base / ".venv-vision" / "Scripts" / "python.exe",
+        _base.parent / "RoadTwin" / ".venv-vision" / "Scripts" / "python.exe",
+        _base.parent / ".venv-vision" / "Scripts" / "python.exe",
+    ]
+    for c in candidates:
+        if c.exists():
+            return c
+    return None
+
+
 @app.get("/vision/status")
 def vision_status() -> dict:
     """Check if vision environment and model weights are ready."""
-    vision_python = _base / ".venv-vision" / "Scripts" / "python.exe"
-    has_venv = vision_python.exists()
+    vision_python = _get_vision_python()
+    has_venv = vision_python is not None
     return {
         "available": has_venv,
         "venv_path": str(vision_python) if has_venv else None,
@@ -524,8 +556,8 @@ def vision_run(edge_id: str | None = None, zoom: int = 18) -> dict:
     _require_location()
     proj = _project_dir()
 
-    vision_python = _base / ".venv-vision" / "Scripts" / "python.exe"
-    if not vision_python.exists():
+    vision_python = _get_vision_python()
+    if not vision_python:
         raise HTTPException(status_code=503,
                             detail="Vision environment not configured (.venv-vision missing).")
 
@@ -765,18 +797,49 @@ def review_decision(req: ReviewDecisionRequest) -> dict:
 
     # 5. Quick re-simulation to update metrics if routes exist
     sim_result = None
-    routes_file = proj / "routes.rou.xml"
+    routes_file = proj / "sumo" / "routes.rou.xml"
+    if not routes_file.exists():
+        routes_file = proj / "routes.rou.xml"
     if routes_file.exists():
+        from config import CLOSURE, SIM
         from core.sim import run, scenario
-        closure_file = proj / "closure.add.xml"
+        closure_file = proj / "sumo" / "closure.add.xml"
         if not closure_file.exists():
-            scenario.build_closure_additional(sumo_net, edge_id, 0, closure_file)
-        try:
-            sim_result = run.run_experiment(
-                sumo_net, routes_file, closure_file, seeds=[42], out_dir=proj / "sim"
-            )
-        except Exception:
-            sim_result = None
+            closure_file = proj / "closure.add.xml"
+        if not closure_file.exists():
+            scenario_json = proj / "scenario.json"
+            lane_idx = 0
+            if scenario_json.exists():
+                try:
+                    s_data = json.loads(scenario_json.read_text(encoding="utf-8"))
+                    lane_idx = s_data.get("lane_index", 0)
+                except Exception:
+                    lane_idx = 0
+            try:
+                scenario.build_lane_closure(
+                    sumo_net,
+                    closure_file,
+                    edge_id=edge_id,
+                    lane_index=lane_idx,
+                    begin=CLOSURE["begin"],
+                    end=CLOSURE["end"],
+                )
+            except Exception:
+                pass
+        if closure_file.exists():
+            try:
+                sim_result = run.run_experiment(
+                    sumo_net,
+                    routes_file,
+                    proj / "sumo" / "results",
+                    closure_file,
+                    seeds=SIM["seeds"][:1],
+                    begin=SIM["begin"],
+                    end=SIM["end"],
+                    closed_edge=edge_id,
+                )
+            except Exception:
+                sim_result = None
 
     return {
         "ok": True,
