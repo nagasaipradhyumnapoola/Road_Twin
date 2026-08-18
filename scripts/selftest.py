@@ -252,6 +252,17 @@ def test_metrics():
     noise = M.compare(base, {**base, "avg_travel_time_s": 42.5})
     check("compare: change within seed noise flagged NOT significant",
           noise["significant"] is False)
+
+    # A run where no vehicle completed has avg_travel_time_s = None. The
+    # `tt_sd == 0` shortcut used to call that significant, so an empty
+    # simulation exited 0 and read as a successful experiment.
+    empty = M.aggregate([{"avg_travel_time_s": None, "mean_queue_length_m": None,
+                          "completed_vehicles": 0}])
+    check("compare: empty simulation is NEVER significant",
+          M.compare(empty, empty)["significant"] is False)
+    check("compare: one-sided empty result is NEVER significant",
+          M.compare(base, empty)["significant"] is False
+          and M.compare(empty, base)["significant"] is False)
     check("format_table renders", "BASELINE" in M.format_table(c))
 
 
@@ -492,6 +503,134 @@ def test_geometry():
             check("unknown edge raises", True)
 
 
+def test_paired():
+    section("core/sim/metrics.py  -- paired significance + breakdown regime")
+    from core.sim import metrics as M
+
+    def arm(per_seed):
+        """Build an aggregate the way run_scenario would, from per-seed runs."""
+        seeds = sorted(per_seed)
+        runs = [per_seed[s] for s in seeds]
+        return M.aggregate(runs, seeds=seeds)
+
+    def run(tt, speed=12.0, tel=1.0, running=20.0):
+        return {"avg_travel_time_s": tt, "mean_queue_length_m": 10.0,
+                "completed_vehicles": 1000, "teleports": tel,
+                "still_running_at_end": running, "mean_speed_end": speed}
+
+    # aggregate() must keep the per-seed values, or pairing is impossible
+    a = arm({42: run(80.0), 43: run(90.0)})
+    check("aggregate keeps per-seed values", set(a["per_seed"]) == {42, 43})
+    check("aggregate still reports the mean", a["avg_travel_time_s"] == 85.0)
+
+    # A small, CONSISTENT shift is significant when paired even though the
+    # arm-level spread dwarfs it -- this is the case the old unpaired rule got
+    # wrong. Baseline seeds range 80-120 (sd ~14); every seed gains exactly 5s.
+    base = arm({s: run(t) for s, t in zip(range(42, 52), range(80, 130, 5))})
+    clos = arm({s: run(t + 5) for s, t in zip(range(42, 52), range(80, 130, 5))})
+    pe = M.paired_effect(base, clos)
+    check("paired: consistent shift detected despite large arm spread",
+          pe is not None and pe["significant"] and pe["mean_delta"] == 5.0,
+          f"mean={pe['mean_delta']} CI={pe['ci95']}" if pe else "None")
+    check("paired: unpaired 2-sigma rule would have MISSED it",
+          abs(clos["avg_travel_time_s"] - base["avg_travel_time_s"])
+          <= 2 * max(base["avg_travel_time_s_sd"], clos["avg_travel_time_s_sd"]))
+    check("paired: reports direction and seed tally",
+          pe["direction"] == "increase" and pe["n_positive"] == 10
+          and pe["n_negative"] == 0)
+    check("paired: CI excludes zero when significant",
+          pe["ci95"][0] > 0 and pe["ci95"][1] > 0, str(pe["ci95"]))
+    check("compare() uses the paired test when per-seed data exists",
+          M.compare(base, clos)["method"].startswith("paired"))
+
+    # Pure noise must NOT pass. Same seeds, deltas alternating +/-, mean ~0.
+    noisy_b = arm({s: run(80.0) for s in range(42, 52)})
+    noisy_c = arm({s: run(80.0 + (6 if s % 2 else -6)) for s in range(42, 52)})
+    pn = M.paired_effect(noisy_b, noisy_c)
+    check("paired: alternating noise is NOT significant",
+          pn is not None and not pn["significant"], str(pn["ci95"]) if pn else "None")
+
+    # A significant SPEED-UP must be reported as such, not silently passed.
+    fast = arm({s: run(70.0) for s in range(42, 52)})
+    pf = M.paired_effect(noisy_b, fast)
+    check("paired: significant speed-up flagged as a decrease",
+          pf["significant"] and pf["direction"] == "decrease")
+    check("compare() verdict warns on a significant speed-up",
+          "FASTER" in M.compare(noisy_b, fast)["verdict"].upper()
+          or "DECREASED" in M.compare(noisy_b, fast)["verdict"].upper())
+
+    # Falls back cleanly when pairing is impossible.
+    check("paired: returns None without per-seed data",
+          M.paired_effect({"avg_travel_time_s": 80.0},
+                          {"avg_travel_time_s": 90.0}) is None)
+    check("paired: returns None with a single shared seed",
+          M.paired_effect(arm({42: run(80.0)}), arm({42: run(90.0)})) is None)
+    legacy = M.compare({"avg_travel_time_s": 42.0, "avg_travel_time_s_sd": 1.0},
+                       {"avg_travel_time_s": 56.0, "avg_travel_time_s_sd": 1.5})
+    check("compare() falls back to the unpaired rule for legacy aggregates",
+          legacy["significant"] is True and "fallback" in legacy["method"])
+
+    # ---- one-seed safety -------------------------------------------------
+    # `--seeds 1` used to reach the unpaired fallback, where a lone run has
+    # sd == 0 and the zero-variance shortcut returned significant = True. That
+    # let ANY one-seed result exit 0, including a closure that made the network
+    # faster. SETUP.md recommended exactly that command.
+    one_b = arm({42: run(85.0)})
+    one_faster = arm({42: run(70.0)})
+    one_slower = arm({42: run(120.0)})
+
+    r1 = M.compare(one_b, one_faster)
+    check("one seed: a significant-looking SPEED-UP cannot pass",
+          r1["significant"] is False, r1["method"])
+    check("one seed: exit gate would fail (significant is False)",
+          r1["significant"] is False)
+    check("one seed: method names the reason",
+          "insufficient seeds" in r1["method"], r1["method"])
+    check("one seed: verdict says smoke test, not experiment",
+          "SMOKE TEST" in r1["verdict"])
+    check("one seed: a large slowdown also cannot pass",
+          M.compare(one_b, one_slower)["significant"] is False)
+
+    # Two seeds is the smallest set that can be paired at all, and the paired
+    # method must take over again the moment it is available.
+    two = M.compare(arm({42: run(85.0), 43: run(85.0)}),
+                    arm({42: run(90.0), 43: run(90.0)}))
+    check("two seeds: paired method takes over",
+          two["method"].startswith("paired") and two["significant"] is True,
+          two["method"])
+    check("20 seeds: paired method still used (normal path unchanged)",
+          M.compare(arm({s: run(85.0) for s in range(42, 62)}),
+                    arm({s: run(90.0) for s in range(42, 62)})
+                    )["method"].startswith("paired"))
+
+    # The guard keys on n_seeds, which hand-built aggregates do not carry, so
+    # legacy callers keep the old fallback rather than being blocked.
+    legacy_ok = M.compare({"avg_travel_time_s": 42.0, "avg_travel_time_s_sd": 1.0},
+                          {"avg_travel_time_s": 56.0, "avg_travel_time_s_sd": 1.5})
+    check("legacy aggregates without n_seeds are not blocked by the guard",
+          legacy_ok["significant"] is True and "fallback" in legacy_ok["method"])
+
+    # Breakdown regime: counted separately, criterion is relative to the
+    # seed's OWN baseline so it transfers across networks.
+    bd_b = arm({s: run(80.0, speed=12.0) for s in range(42, 46)})
+    bd_c = arm({42: run(200.0, speed=4.0, tel=50.0, running=60.0),
+                43: run(85.0, speed=11.0),
+                44: run(85.0, speed=11.0),
+                45: run(85.0, speed=11.0)})
+    bd = M.classify_breakdown(bd_b, bd_c)
+    check("breakdown: counts only the collapsed seed",
+          bd["n_breakdown"] == 1 and bd["breakdown_seeds"] == [42])
+    check("breakdown: reports a probability", bd["breakdown_probability"] == 0.25)
+    check("breakdown: conditional severity describes only breakdown runs",
+          bd["conditional_severity"]["closure_travel_time_s"] == 200.0)
+    check("breakdown: normal regime reported separately",
+          bd["normal_regime"]["n"] == 3)
+    check("breakdown: unfinished vehicles surfaced (they are censored trips)",
+          bd["conditional_severity"]["closure_still_running_at_end"] == 60.0)
+    check("breakdown: significance is independent of breakdown count",
+          M.compare(bd_b, bd_c)["breakdown"]["n_breakdown"] == 1)
+
+
 def test_phase0_gate():
     section("scripts/run_benchmark.py  -- the Phase 0 --skip-sim gate")
     import importlib.util
@@ -564,6 +703,7 @@ def main() -> int:
     test_edits()
     test_scenario()
     test_geometry()
+    test_paired()
     test_phase0_gate()
     test_export()
     print("\n" + "=" * 72)
