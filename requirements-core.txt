@@ -26,3 +26,7 @@ pyproj>=3.6
 pyinstaller>=6.6
 pytest>=8.2
 ruff>=0.4
+# starlette's TestClient (used by scripts/test_all_endpoints.py) needs an HTTP
+# client library. httpx is the canonical one; this starlette build prefers a
+# rebranded "httpx2" but falls back to httpx. Dev/test only -- never frozen.
+httpx>=0.27

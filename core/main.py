@@ -33,9 +33,11 @@ if str(_base) not in sys.path:
 
 # ── imports ───────────────────────────────────────────────────────────────────
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # ── version ───────────────────────────────────────────────────────────────────
 __version__ = "0.2.0"
@@ -53,6 +55,23 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(RequestValidationError)
+def _clean_validation_error(request: Request, exc: RequestValidationError):
+    """Return a clean 422 that does not echo the raw input.
+
+    FastAPI's default handler puts the offending `input` back into the response.
+    For a NaN/Infinity latitude that value is not JSON-serialisable, so the
+    default response itself crashes with a 500 -- turning a correctly-rejected
+    request into a server error. Dropping `input` also avoids reflecting caller
+    data. The field/message/type still identify what was wrong.
+    """
+    errors = [
+        {"loc": e.get("loc"), "msg": e.get("msg"), "type": e.get("type")}
+        for e in exc.errors()
+    ]
+    return JSONResponse(status_code=422, content={"detail": errors})
 
 
 # ── request / response models ─────────────────────────────────────────────────
@@ -76,11 +95,22 @@ class GeocandiDate(BaseModel):
 
 
 class ConfirmRequest(BaseModel):
+    """A user confirming a map location. Validated at the request boundary so
+    invalid geography cannot reach location.json or any downstream operation.
+
+    `confirmation_method` is deliberately NOT a client field: the manual-map
+    flow is always a human confirmation, so the server stamps "user" itself.
+    Letting the client send it allowed a caller to write
+    confirmation_method="benchmark_config" and forge system-generated
+    provenance. `model_config` extra="ignore" (Pydantic default) means the
+    frontend still sending the field is harmless.
+    """
     name: str
-    lat: float
-    lon: float
-    aoi_radius_m: float = 500.0
-    confirmation_method: str = "user"
+    # allow_inf_nan=False rejects NaN/Infinity at the boundary; ge/le bound the
+    # geography. Both raise 422 before the handler runs.
+    lat: float = Field(ge=-90.0, le=90.0, allow_inf_nan=False)
+    lon: float = Field(ge=-180.0, le=180.0, allow_inf_nan=False)
+    aoi_radius_m: float = Field(default=500.0, gt=0.0, allow_inf_nan=False)
 
 
 class AcquireRequest(BaseModel):
@@ -93,11 +123,34 @@ class BuildRequest(BaseModel):
 
 # ── project directory helper ──────────────────────────────────────────────────
 
+def _data_root() -> Path:
+    """Where the app keeps PERSISTENT project state.
+
+    Frozen (PyInstaller onefile), config.PROJECTS_DIR resolves inside the
+    _MEIxxxx extraction dir, which is deleted on exit -- so a confirmed location
+    did not survive a restart of the installed app. Persist under a real
+    per-user data directory instead. Dev/source runs keep writing to the repo's
+    projects/ so nothing about the developer workflow changes.
+
+    ROADTWIN_DATA_DIR overrides everything (tests, custom installs).
+    """
+    env = os.environ.get("ROADTWIN_DATA_DIR")
+    if env:
+        return Path(env)
+    if getattr(sys, "frozen", False):
+        base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
+        root = Path(base) if base else (Path.home() / ".roadtwin")
+        return root / "RoadTwin"
+    # Dev/source: the directory that CONTAINS projects/ is the repo root, so
+    # _data_root()/projects/active == the original PROJECTS_DIR/active.
+    from config import ROOT as _ROOT
+    return _ROOT
+
+
 def _project_dir() -> Path:
     """Active project directory — always 'active' until multi-project support."""
     try:
-        from config import PROJECTS_DIR
-        p = PROJECTS_DIR / "active"
+        p = _data_root() / "projects" / "active"
         p.mkdir(parents=True, exist_ok=True)
         return p
     except Exception:
@@ -184,24 +237,53 @@ def get_location() -> dict:
 
 @app.post("/location/geocode")
 def geocode(body: GeocodeRequest) -> list[GeocandiDate]:
-    """Address → candidate list via Nominatim (rate-limited, cached)."""
+    """Address -> candidate list via Nominatim (rate-limited, cached).
+
+    An empty query is not an error -- it returns []. A reachable geocoder that
+    simply finds nothing also returns [] (the frontend shows "no matches").
+    Only an upstream FAILURE (network error, HTTP 4xx/5xx) becomes a 503, with
+    a clean application-level message -- never the raw upstream URL or traceback,
+    which leak internal detail and confuse the user.
+    """
+    import requests as _requests
+
+    from config import ASSETS, NOMINATIM_USER_AGENT
+    from core.acquire.geocoder import geocode as _geocode
+
+    if not body.query or not body.query.strip():
+        return []
+
     try:
-        from core.acquire.geocoder import geocode as _geocode
-        from config import OVERPASS, ASSETS
-        cache_dir = ASSETS / "geocache"
         results = _geocode(
             body.query,
-            user_agent=OVERPASS["user_agent"],
-            cache_dir=cache_dir,
+            user_agent=NOMINATIM_USER_AGENT,
+            cache_dir=ASSETS / "geocache",
         )
-        return [GeocandiDate(**r) for r in results]
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except (_requests.HTTPError, _requests.RequestException):
+        # Upstream refused, timed out, or is unreachable. Do not surface the URL
+        # or the exception text.
+        raise HTTPException(
+            status_code=503,
+            detail=("Address lookup is temporarily unavailable. "
+                    "Please try again, or enter coordinates manually."),
+        ) from None
+    except Exception:
+        raise HTTPException(
+            status_code=503,
+            detail=("Address lookup failed. "
+                    "Please enter coordinates manually."),
+        ) from None
+
+    return [GeocandiDate(**r) for r in results]
 
 
 @app.post("/location/confirm")
 def confirm_location(body: ConfirmRequest) -> dict:
-    """Write location.json. Gates all downstream pipeline calls."""
+    """Write location.json. Gates all downstream pipeline calls.
+
+    The server assigns confirmation_method="user" -- this endpoint IS the manual
+    human-confirmation flow, so the provenance is not the client's to claim.
+    """
     data = {
         "name": body.name,
         "lat": body.lat,
@@ -209,9 +291,18 @@ def confirm_location(body: ConfirmRequest) -> dict:
         "aoi_radius_m": body.aoi_radius_m,
         "crs": "EPSG:4326",
         "confirmed": True,
-        "confirmation_method": body.confirmation_method,
+        "confirmation_method": "user",
     }
-    _location_path().write_text(json.dumps(data, indent=2), encoding="utf-8")
+    # allow_nan=False makes json.dumps RAISE rather than emit a bare NaN/Infinity
+    # token (which is invalid JSON that the frontend's JSON.parse cannot read).
+    # ConfirmRequest already rejects non-finite input, so this is belt-and-braces
+    # -- but it guarantees the file on disk is always strict JSON.
+    try:
+        payload = json.dumps(data, indent=2, allow_nan=False)
+    except ValueError as exc:
+        raise HTTPException(status_code=422,
+                            detail="Coordinates must be finite numbers.") from exc
+    _location_path().write_text(payload, encoding="utf-8")
     return {"ok": True, "location": data}
 
 
@@ -292,6 +383,7 @@ def build_model(body: BuildRequest) -> dict:
 @app.get("/network/geojson")
 def network_geojson() -> dict:
     """Return roads + junctions GeoJSON for the MapLibre overlay."""
+    _require_location()   # location-dependent, so gate it like its siblings
     proj = _project_dir()
     roads_path = proj / "roads.geojson"
     juncs_path = proj / "junctions.geojson"

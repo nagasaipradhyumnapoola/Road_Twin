@@ -50,6 +50,8 @@ export function LocationGateway({ onConfirmed }: LocationGatewayProps) {
   const mapObj      = useRef<maplibregl.Map | null>(null);
   const markerRef   = useRef<maplibregl.Marker | null>(null);
   const circleRef   = useRef<maplibregl.GeoJSONSource | null>(null);
+  const aoiReady    = useRef(false);
+  const [mapErr, setMapErr] = useState("");
 
   // ── initialise map once ──────────────────────────────────────────────────
   useEffect(() => {
@@ -57,8 +59,31 @@ export function LocationGateway({ onConfirmed }: LocationGatewayProps) {
 
     const map = new maplibregl.Map({
       container: mapRef.current,
-      // OpenFreeMap — no API key required, open-access
-      style: "https://tiles.openfreemap.org/styles/liberty",
+      // OSM raster tiles — universally reliable, no API key needed
+      style: {
+        version: 8,
+        sources: {
+          "osm-raster": {
+            type: "raster",
+            tiles: [
+              "https://a.tile.openstreetmap.org/{z}/{x}/{y}.png",
+              "https://b.tile.openstreetmap.org/{z}/{x}/{y}.png",
+              "https://c.tile.openstreetmap.org/{z}/{x}/{y}.png",
+            ],
+            tileSize: 256,
+            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+          },
+        },
+        layers: [
+          {
+            id: "osm-tiles",
+            type: "raster",
+            source: "osm-raster",
+            minzoom: 0,
+            maxzoom: 19,
+          },
+        ],
+      },
       center: [lon, lat],
       zoom: 15,
     });
@@ -66,8 +91,25 @@ export function LocationGateway({ onConfirmed }: LocationGatewayProps) {
     map.addControl(new maplibregl.NavigationControl(), "top-right");
     map.addControl(new maplibregl.ScaleControl(), "bottom-left");
 
-    map.on("load", () => {
-      // AOI circle source
+    // Marker does NOT depend on the style/tiles being parsed — attach it
+    // immediately so the site pin is visible even if tile loading stalls.
+    const el = document.createElement("div");
+    el.className = "rt-marker";
+    const marker = new maplibregl.Marker({ element: el, draggable: true })
+      .setLngLat([lon, lat])
+      .addTo(map);
+    marker.on("dragend", () => {
+      const { lng, lat: lt } = marker.getLngLat();
+      updateCoords(lt, lng, "drag");
+    });
+    markerRef.current = marker;
+
+    // AOI fill/outline DO need the style loaded (addSource/addLayer). Run the
+    // setup once the style is ready; guard so it never runs twice, and fall
+    // back to `idle` in case `load` is missed.
+    const setupAOI = () => {
+      if (aoiReady.current || !map.isStyleLoaded()) return;
+      aoiReady.current = true;
       map.addSource("aoi-circle", {
         type: "geojson",
         data: buildCircleGeoJSON(lat, lon, radius),
@@ -85,20 +127,15 @@ export function LocationGateway({ onConfirmed }: LocationGatewayProps) {
         paint: { "line-color": "#3b82f6", "line-width": 1.5, "line-dasharray": [4, 3] },
       });
       circleRef.current = map.getSource("aoi-circle") as maplibregl.GeoJSONSource;
+    };
+    map.on("load", setupAOI);
+    map.on("idle", setupAOI);
 
-      // Draggable marker
-      const el = document.createElement("div");
-      el.className = "rt-marker";
-      const marker = new maplibregl.Marker({ element: el, draggable: true })
-        .setLngLat([lon, lat])
-        .addTo(map);
-
-      marker.on("dragend", () => {
-        const { lng, lat: lt } = marker.getLngLat();
-        updateCoords(lt, lng, "drag");
-      });
-
-      markerRef.current = marker;
+    // Surface map/tile failures instead of leaving a silent blank canvas.
+    map.on("error", (e: { error?: { message?: string } }) => {
+      const msg = e?.error?.message ?? "Map failed to load tiles.";
+      console.error("[LocationGateway] MapLibre error:", msg);
+      setMapErr("Map tiles could not be loaded. Coordinates and Confirm still work.");
     });
 
     map.on("click", (e: maplibregl.MapMouseEvent) => {
@@ -106,7 +143,7 @@ export function LocationGateway({ onConfirmed }: LocationGatewayProps) {
     });
 
     mapObj.current = map;
-    return () => { map.remove(); mapObj.current = null; };
+    return () => { map.remove(); mapObj.current = null; aoiReady.current = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -316,7 +353,10 @@ export function LocationGateway({ onConfirmed }: LocationGatewayProps) {
       </aside>
 
       {/* ── map ── */}
-      <div ref={mapRef} className="lg-map" />
+      <div className="lg-map-wrap">
+        <div ref={mapRef} className="lg-map" />
+        {mapErr && <div className="lg-map-err">{mapErr}</div>}
+      </div>
     </div>
   );
 }

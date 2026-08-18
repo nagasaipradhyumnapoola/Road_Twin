@@ -58,33 +58,72 @@ export default function App() {
   const [twinState, setTwinState]   = useState<TwinState>("IDLE");
 
   useEffect(() => {
-    const unlistenReady = listen<number>("sidecar-ready", async ({ payload: port }) => {
-      try {
-        await fetchHealth(port);
-        window.__rtPort = port;
-        setSidecar({ kind: "ready", port });
-        setCheckingLoc(true);
-        const loc = await fetchLocation(port);
-        setLocation(loc);
-        if (loc) {
-          setTwinState("IDLE");
-        } else {
-          setTwinState("LOCATING");
+    // Detect if we're running inside Tauri or a plain browser
+    const isTauri = !!(window as any).__TAURI_INTERNALS__;
+
+    if (isTauri) {
+      // Original Tauri sidecar event listener
+      const unlistenReady = listen<number>("sidecar-ready", async ({ payload: port }) => {
+        try {
+          await fetchHealth(port);
+          window.__rtPort = port;
+          setSidecar({ kind: "ready", port });
+          setCheckingLoc(true);
+          const loc = await fetchLocation(port);
+          setLocation(loc);
+          if (loc) {
+            setTwinState("IDLE");
+          } else {
+            setTwinState("LOCATING");
+          }
+          setCheckingLoc(false);
+        } catch (e) {
+          setSidecar({ kind: "error", message: String(e) });
+          setTwinState("FAILED");
         }
-        setCheckingLoc(false);
-      } catch (e) {
-        setSidecar({ kind: "error", message: String(e) });
+      });
+      const unlistenError = listen<string>("sidecar-error", ({ payload: message }) => {
+        setSidecar({ kind: "error", message });
         setTwinState("FAILED");
-      }
-    });
-    const unlistenError = listen<string>("sidecar-error", ({ payload: message }) => {
-      setSidecar({ kind: "error", message });
-      setTwinState("FAILED");
-    });
-    return () => {
-      unlistenReady.then((f) => f());
-      unlistenError.then((f) => f());
-    };
+      });
+      return () => {
+        unlistenReady.then((f) => f());
+        unlistenError.then((f) => f());
+      };
+    } else {
+      // Browser fallback: poll the FastAPI backend directly
+      const defaultPort = 8765;
+      let cancelled = false;
+      (async () => {
+        // Retry up to 15 times (covers ~15s of startup delay)
+        for (let attempt = 0; attempt < 15 && !cancelled; attempt++) {
+          try {
+            await fetchHealth(defaultPort);
+            if (cancelled) return;
+            window.__rtPort = defaultPort;
+            setSidecar({ kind: "ready", port: defaultPort });
+            setCheckingLoc(true);
+            const loc = await fetchLocation(defaultPort);
+            if (cancelled) return;
+            setLocation(loc);
+            if (loc) {
+              setTwinState("IDLE");
+            } else {
+              setTwinState("LOCATING");
+            }
+            setCheckingLoc(false);
+            return; // connected successfully
+          } catch {
+            await new Promise((r) => setTimeout(r, 1000));
+          }
+        }
+        if (!cancelled) {
+          setSidecar({ kind: "error", message: "Could not reach FastAPI backend at port 8765. Is the server running?" });
+          setTwinState("FAILED");
+        }
+      })();
+      return () => { cancelled = true; };
+    }
   }, []);
 
   if (sidecar.kind === "booting" || checkingLoc) {
