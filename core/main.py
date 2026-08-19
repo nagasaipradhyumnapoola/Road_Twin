@@ -870,19 +870,34 @@ def review_decision(req: ReviewDecisionRequest) -> dict:
     # 4. Write validation report
     write_validation_report(edits, observations, report_path)
 
-    # 5. Quick re-simulation to update metrics if routes exist
+    # 5. Re-simulation to refresh metrics on the edited network. The closure
+    #    additional lives under sumo/ next to the network; building it is INSIDE
+    #    the try so a closure-build or SUMO failure is reported (sim_error) rather
+    #    than raising a 500 after the model has already been mutated on disk.
     sim_result = None
+    sim_error = None
     routes_file = proj / "routes.rou.xml"
     if routes_file.exists():
+        from config import SIM, CLOSURE
         from core.sim import run, scenario
-        closure_file = proj / "closure.add.xml"
-        if not closure_file.exists():
-            scenario.build_closure_additional(sumo_net, edge_id, 0, closure_file)
+        closure_file = proj / "sumo" / "closure.add.xml"
         try:
+            if not closure_file.exists():
+                scenario.build_lane_closure(
+                    sumo_net, closure_file,
+                    edge_id=edge_id, lane_index=0,
+                    begin=CLOSURE["begin"], end=CLOSURE["end"],
+                )
             sim_result = run.run_experiment(
-                sumo_net, routes_file, closure_file, seeds=[42], out_dir=proj / "sim"
+                sumo_net, routes_file,
+                proj / "sumo" / "results",
+                closure_file,
+                seeds=[42],
+                begin=SIM["begin"], end=SIM["end"],
+                closed_edge=edge_id,
             )
-        except Exception:
+        except Exception as exc:
+            sim_error = str(exc)
             sim_result = None
 
     return {
@@ -893,6 +908,7 @@ def review_decision(req: ReviewDecisionRequest) -> dict:
         "new_value": new_val,
         "recompiled": True,
         "sim_result": sim_result,
+        "sim_error": sim_error,
     }
 
 
