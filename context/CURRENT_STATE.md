@@ -206,3 +206,45 @@ worst-affected trips — hardest in exactly the runs where the closure bites
 most. A controlled 7200 s check showed the network fully drains and the paired
 mean rises from +16.79 s to +22.77 s. The breakdown block reports the
 unfinished count so the censoring is visible.
+
+### Teleport warnings vs raw teleport counts  (P5 acceptance clarification)
+
+"Teleport" and "teleport warning" are different things, and the P5 checklist
+item means the latter. A teleport is a single SUMO event: one vehicle that
+waited past `--time-to-teleport` (300 s) is jumped forward. A **teleport
+warning** is the project's own reliability gate in `core/sim/metrics.py`
+(`collect_run`): it fires only when a run's teleports exceed **5% of its
+completed vehicles** — the point at which the metrics stop describing
+congestion and start describing a broken run.
+
+- **Raw teleports are kept and reported — do not zero them.** They are
+  meaningful breakdown data: the closure strands vehicles at the closed-lane
+  merge, and the count scales with breakdown severity. Baseline runs teleport
+  0–15 times per seed (max 1.27% of completed) on edges away from the closure;
+  closure runs teleport 13–58 times per seed, ~93% of them on or immediately
+  upstream of the closed edge and all after the closure opens at 300 s. The
+  dominant cause is "wrong lane" (closed-lane traffic unable to merge in time),
+  with additional "jam" teleports in the breakdown regime.
+- **Most runs stay under the warning threshold; the worst breakdown seed sits
+  at it.** Across the 20 seeds, 19 closure runs are 1.1–4.4% of completed —
+  below the 5% gate — but the single worst breakdown seed (60) reaches
+  **58 teleports / 1135 completed = 5.11%, just over 5%**, so the teleport
+  warning in `collect_run` fires on that one seed. Baseline never approaches it
+  (≤1.27%). Raw teleport counts stay non-zero and informative regardless.
+
+P5 acceptance criteria, read against this network's measured behavior:
+
+- **Zero teleport warnings** = no seed exceeds the 5%-of-completed teleport
+  warning threshold. This is a **boundary result, not cleanly satisfied**: on a
+  full 20-seed run the worst breakdown seed (60) sits at ~5.1%, marginally over
+  the gate, so one seed can trip the warning while the other 19 stay under. It
+  does **not** mean the raw teleport count is zero — a closure strong enough to
+  add a measurable delay necessarily strands some closed-lane mergers, so "zero
+  closure teleports" and "a measurable closure effect" are mutually exclusive
+  on this network.
+- **Closure effect** is the **paired 20-seed result** (mean +16.79 s, 95% CI
+  [+4.15, +29.42] s, 18/20 positive, significant = TRUE) — not a requirement
+  that every individual seed fall inside 20–60%. The response is bimodal
+  (~75% of seeds absorb the closure with a ~6% median rise, ~25% enter
+  breakdown with a larger increase), so a single flat percentage band does not
+  describe it. See "Expected result shape" in DEMO_SPEC.md.
