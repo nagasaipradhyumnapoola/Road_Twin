@@ -367,7 +367,7 @@ def build_model(body: BuildRequest) -> dict:
             confirmed=True,
             confirmation_method=loc_data.get("confirmation_method", "user"),
         )
-        model = build_from_net(net_file, location, proj)
+        model = build_from_net(net_file, location, proj, osm_file=osm_path)
 
         return {
             "ok": True,
@@ -770,7 +770,7 @@ def review_decision(req: ReviewDecisionRequest) -> dict:
         else:
             raise HTTPException(status_code=500, detail="plain.edg.xml not found for editing.")
 
-    from core.model.edits import Edit, apply_edits, write_validation_report
+    from core.model.edits import Edit, apply_edits, prune_stale_connections, write_validation_report
     from core.build.netconvert import plain_to_net
 
     report_path = proj / "validation_report.json"
@@ -850,6 +850,10 @@ def review_decision(req: ReviewDecisionRequest) -> dict:
         "con": proj / "build" / "plain.con.xml" if (proj / "build" / "plain.con.xml").exists() else None,
         "tll": proj / "build" / "plain.tll.xml" if (proj / "build" / "plain.tll.xml").exists() else None,
     }
+    # A lane reduction leaves connections referencing removed lanes; prune them
+    # so netconvert does not abort on "Lane index is larger than number of lanes".
+    if applied_edits and plain_files["con"] is not None:
+        prune_stale_connections(plain_files["con"], plain_edg)
     plain_to_net(plain_files, sumo_net, xodr_out=xodr_file)
 
     # 4. Write validation report

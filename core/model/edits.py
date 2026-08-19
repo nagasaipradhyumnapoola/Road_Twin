@@ -93,6 +93,19 @@ def apply_edits(
         node.set(ed.attribute, str(ed.new_value))
         applied += 1
 
+        # A numLanes reduction must also drop any explicit <lane index="N">
+        # children with N >= the new count. netconvert emits these per-lane
+        # elements (they hold origId etc.), and leaving a lane index that the
+        # edge no longer has makes it abort: "Lane index is larger than number
+        # of lanes". Increasing lanes keeps every existing child (all indices
+        # stay < numLanes), so this is a no-op there.
+        if ed.attribute == "numLanes" and str(ed.new_value).isdigit():
+            n = int(ed.new_value)
+            for lane in list(node.findall("lane")):
+                li = lane.get("index")
+                if li is not None and li.isdigit() and int(li) >= n:
+                    node.remove(lane)
+
     if skipped:
         print(f"[edits] WARNING: {len(skipped)} edge(s) not found: {skipped[:5]}")
 
@@ -100,6 +113,60 @@ def apply_edits(
     tree.write(str(out_file), pretty_print=True, xml_declaration=True, encoding="UTF-8")
     print(f"[edits] applied {applied}/{len(edits)} edit(s) -> {out_file.name}")
     return out_file
+
+
+def prune_stale_connections(
+    con_file: str | Path,
+    edg_file: str | Path,
+    out_file: str | Path | None = None,
+) -> tuple[Path, int]:
+    """Drop connections that reference lane indices an edge no longer has.
+
+    Reducing an edge's ``numLanes`` (e.g. an accepted vision correction of a
+    4-lane road down to 3) leaves the plain ``.con.xml`` referencing the removed
+    lane (``fromLane``/``toLane`` >= the new count). netconvert rejects that with
+    "Lane index is larger than number of lanes". This is the connection-cleanup
+    step the edit pipeline runs after a lane reduction and before netconvert, so
+    the editable plain network stays the single source of truth.
+
+    A connection is stale when its ``fromLane`` exceeds the lane count of its
+    ``from`` edge, or its ``toLane`` exceeds the lane count of its ``to`` edge.
+    Lanes are 0-indexed, so a valid index is ``0 .. numLanes-1``. Returns the
+    written path and the number of connections removed.
+    """
+    con_file = Path(con_file)
+    out_file = Path(out_file) if out_file else con_file
+
+    lane_counts = {
+        eid: int(attrs.get("numLanes", "1"))
+        for eid, attrs in read_edges(edg_file).items()
+        if str(attrs.get("numLanes", "")).isdigit()
+    }
+
+    parser = etree.XMLParser(remove_blank_text=False)
+    tree = etree.parse(str(con_file), parser)
+    root = tree.getroot()
+
+    def _stale(edge_id: str | None, lane_attr: str | None) -> bool:
+        if edge_id is None or lane_attr is None or edge_id not in lane_counts:
+            return False
+        try:
+            return int(lane_attr) >= lane_counts[edge_id]
+        except ValueError:
+            return False
+
+    removed = 0
+    for conn in list(root.iter("connection")):
+        if _stale(conn.get("from"), conn.get("fromLane")) or \
+           _stale(conn.get("to"), conn.get("toLane")):
+            conn.getparent().remove(conn)
+            removed += 1
+
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+    tree.write(str(out_file), pretty_print=True, xml_declaration=True, encoding="UTF-8")
+    if removed:
+        print(f"[edits] pruned {removed} stale connection(s) -> {out_file.name}")
+    return out_file, removed
 
 
 def write_validation_report(

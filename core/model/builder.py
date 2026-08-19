@@ -39,22 +39,93 @@ _LANE_DEFAULTS: dict[str, tuple[int, float]] = {
 }
 
 
-def _lane_provenance(edge_el: Any) -> LaneProvenance:
-    """Return provenance for lane count — records honestly whether OSM said it."""
-    # SUMO propagates the original OSM `lanes` param tag as `numLanes`
-    # We detect a genuine OSM tag vs a netconvert-inferred one by checking
-    # whether the edge has a `param` child with key="lanes"
-    for param in edge_el.findall("param"):
-        if param.get("key") == "lanes":
-            return LaneProvenance(source=LaneSource.osm_tag, confidence=1.0)
+def _load_osm_lane_ways(osm_file: Path | str | None) -> dict[int, int]:
+    """Map OSM way id -> explicit `lanes` value, for the ways that declare one.
 
-    # No OSM tag — infer from highway type
+    This is the ground truth for provenance: netconvert does NOT round-trip the
+    OSM `lanes` tag onto the net.xml edge (it keeps only `origId`, the way id).
+    So "did OSM state the lane count?" is answerable only from the raw OSM,
+    joined back to the edge through that way id.
+    """
+    if not osm_file or not Path(osm_file).exists():
+        return {}
+    out: dict[int, int] = {}
+    root = etree.parse(str(osm_file)).getroot()
+    for way in root.findall("way"):
+        wid = way.get("id")
+        if not wid:
+            continue
+        for tag in way.findall("tag"):
+            if tag.get("k") == "lanes":
+                # OSM `lanes` is normally "4"; occasionally "2;3" (per-direction).
+                raw = (tag.get("v") or "").split(";")[0].strip()
+                try:
+                    out[int(wid)] = int(raw)
+                except ValueError:
+                    pass
+                break
+    return out
+
+
+def _edge_osm_way_ids(edge_el: Any) -> list[int]:
+    """OSM way id(s) this SUMO edge derives from.
+
+    netconvert records the original way id in a `param key="origId"` (on the
+    lane, sometimes space-separated when edges were joined). The edge id itself
+    encodes it too ("568057022#0", "-1046062574"), used as a fallback.
+    """
+    ids: list[int] = []
+    for p in edge_el.iterfind(".//param"):
+        if p.get("key") == "origId":
+            for tok in (p.get("value") or "").split():
+                t = tok.lstrip("-")
+                if t.isdigit():
+                    ids.append(int(t))
+    if not ids:
+        core = edge_el.get("id", "").lstrip("-").split("#")[0]
+        if core.isdigit():
+            ids.append(int(core))
+    seen: set[int] = set()
+    uniq: list[int] = []
+    for i in ids:
+        if i not in seen:
+            seen.add(i)
+            uniq.append(i)
+    return uniq
+
+
+def _lane_provenance(
+    edge_el: Any, osm_lanes: dict[int, int]
+) -> tuple[LaneProvenance, int | None]:
+    """Return (provenance, osm_way_id) for an edge's lane count.
+
+    Honestly records whether OSM stated the lane count. `osm_lanes` maps OSM
+    way id -> explicit `lanes` value; if any of this edge's source ways is in
+    it, the count is OSM-provided (never inferred). Returns the matched way id
+    so the Road can preserve the OSM reference.
+    """
+    way_ids = _edge_osm_way_ids(edge_el)
+    for wid in way_ids:
+        if wid in osm_lanes:
+            return (
+                LaneProvenance(
+                    source=LaneSource.osm_tag,
+                    rule=f"OSM way {wid} lanes={osm_lanes[wid]}",
+                    confidence=1.0,
+                ),
+                wid,
+            )
+
+    # No OSM lanes tag on any source way — infer from highway type
     road_type = edge_el.get("type", "unclassified").split(".")[-1]  # strip prefix
     n_lanes, conf = _LANE_DEFAULTS.get(road_type, (1, 0.25))
-    return LaneProvenance(
-        source=LaneSource.inferred_default,
-        rule=f"highway={road_type} -> {n_lanes} lanes",
-        confidence=conf,
+    return (
+        LaneProvenance(
+            source=LaneSource.inferred_default,
+            rule=f"highway={road_type} -> {n_lanes} lanes",
+            confidence=conf,
+        ),
+        way_ids[0] if way_ids else None,
     )
 
 
@@ -63,8 +134,14 @@ def build_from_net(
     location: Location,
     project_dir: Path,
     osm_sha256: str | None = None,
+    osm_file: Path | str | None = None,
 ) -> RoadTwinModel:
     """Parse `net_file`, build and persist the canonical model.
+
+    `osm_file` is the raw OSM extract the net was built from. It is the source
+    of truth for lane-count provenance: netconvert drops the OSM `lanes` tag, so
+    without it every road is (wrongly) labelled inferred. When omitted,
+    provenance degrades safely to inferred_default.
 
     Writes:
         <project_dir>/roadtwin.json
@@ -72,6 +149,9 @@ def build_from_net(
         <project_dir>/junctions.geojson
     """
     project_dir.mkdir(parents=True, exist_ok=True)
+
+    # --- OSM lane-tag ground truth (for provenance) ---
+    osm_lanes = _load_osm_lane_ways(osm_file)
 
     # --- parse net.xml ---
     tree = etree.parse(str(net_file))
@@ -91,7 +171,7 @@ def build_from_net(
         road_idx += 1
 
         lane_els = edge_el.findall("lane")
-        prov = _lane_provenance(edge_el)
+        prov, osm_way_id = _lane_provenance(edge_el, osm_lanes)
         # infer road_type from SUMO `type` attr (format "highway.trunk" etc.)
         sumo_type = edge_el.get("type", "")
         road_type = sumo_type.split(".")[-1] if "." in sumo_type else "unclassified"
@@ -105,6 +185,7 @@ def build_from_net(
         roads.append(Road(
             id=road_id,
             sumo_edge_id=edge_id,
+            osm_way_id=osm_way_id,
             direction="forward",
             road_type=road_type,
             speed_kph=round(speed_ms * 3.6, 1),
