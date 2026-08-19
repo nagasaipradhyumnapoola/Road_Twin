@@ -60,11 +60,25 @@ Requires SUMO on PATH (SUMO_HOME set). See the top-level README.
 
 def write_source_manifest(project_dir: str | Path, entries: list[dict[str, Any]]) -> Path:
     p = Path(project_dir) / "source_manifest.json"
-    p.write_text(json.dumps(
-        {"schema_version": "0.1",
-         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-         "artifacts": entries},
-        indent=2))
+    # MERGE, do not overwrite. The visual-evidence pipeline (scripts/run_vision.py)
+    # writes the georeferencing transform and imagery source into this same file
+    # under "mosaic" / "imagery". A blind overwrite here destroyed that on every
+    # export, so the mosaic transform was persisted nowhere. Preserve any keys we
+    # do not own; only the provenance fields below are ours to (re)write.
+    existing: dict[str, Any] = {}
+    if p.exists():
+        try:
+            loaded = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                existing = loaded
+        except Exception:
+            existing = {}
+    existing.update({
+        "schema_version": "0.1",
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "artifacts": entries,
+    })
+    p.write_text(json.dumps(existing, indent=2))
     return p
 
 

@@ -103,6 +103,14 @@ IMAGERY = {
     "tile_url": os.environ.get("ROADTWIN_TILE_URL", ""),
     "user_agent": USER_AGENT,
     "max_tiles": 64,              # guard against accidental huge fetches
+    # Lane WIDTH cannot be measured from an OSM cartographic raster -- roads are
+    # drawn there as fixed-width casings, not real carriageways. The lane-evidence
+    # path therefore only runs on genuine overhead/aerial imagery, and only when
+    # the operator explicitly declares the configured tile source aerial. Unset,
+    # false, or a cartographic host -> the pipeline refuses (insufficient evidence)
+    # rather than inventing a lane count. Never silently substitute street tiles.
+    "aerial": os.environ.get("ROADTWIN_TILE_AERIAL", "").strip().lower()
+    in ("1", "true", "yes", "on"),
 }
 
 VISION = {
@@ -117,6 +125,12 @@ VISION = {
     "box_threshold": 0.35,
     "text_threshold": 0.25,
     "nominal_lane_width_m": 3.5,
+    # Physical plausibility ceiling for a single directional road edge. A SUMO
+    # edge is one direction; more than this many lanes on one carriageway edge
+    # means the mask has bled off the road, so the measurement is refused rather
+    # than reported. Derived bound = nominal_lane_width_m * max_plausible_lanes
+    # (=> 28 m). The 51.53 m / 15-lane benchmark false positive is rejected by it.
+    "max_plausible_lanes": 8,
 }
 
 # ---------------------------------------------------------------------------
