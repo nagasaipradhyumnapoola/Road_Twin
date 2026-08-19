@@ -1,0 +1,42 @@
+{
+  "mosaic": {
+    "provider": "xyz-tiles",
+    "zoom": 19,
+    "tile_range": {
+      "x": [
+        378709,
+        378715
+      ],
+      "y": [
+        243303,
+        243309
+      ]
+    },
+    "bbox_wgs84": [
+      80.03883361816406,
+      12.823852938612808,
+      80.04364013671875,
+      12.828539524713623
+    ],
+    "size_px": [
+      1792,
+      1792
+    ],
+    "meters_per_pixel": 0.2911,
+    "crs": "EPSG:4326"
+  },
+  "imagery": {
+    "tile_url_host": "server.arcgisonline.com",
+    "declared_aerial": true,
+    "cartographic_source": false,
+    "aerial": true,
+    "source": "aerial-xyz",
+    "user_agent": "RoadTwin/0.1 (+https://github.com/nagasaipradhyumnapoola/Road_Twin)",
+    "crs": "EPSG:4326",
+    "mosaic_sha256": "01ae5ac356b9fc07dfb90936c2f17e9098871684d9361ae74f491c7c4aadc20d"
+  },
+  "vision_status": {
+    "sufficient": true,
+    "reason": "lane evidence produced"
+  }
+}

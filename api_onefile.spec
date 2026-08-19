@@ -57,11 +57,23 @@ hidden += [
 # its own -- pull the whole xml package in so the tool can run inside api.exe.
 hidden += collect_submodules("xml")
 
+# Packaged P9 demo evidence (ADR-007: no live SAM in the frozen build). The
+# review queue falls back to `_base/assets/benchmark/observations.json` when the
+# active project has no vision output, so ship the verified P7 aerial+SAM result
+# as STATIC evidence. This is what lets a judge run REVIEW -> ACCEPT on a clean
+# install without the multi-GB vision environment. The 5.5 MB mosaic is left in
+# the repo (not the exe) -- no endpoint serves it; only these three are read.
+_demo = [
+    ("assets/benchmark/observations.json", "assets/benchmark"),
+    ("assets/benchmark/road_mask.geojson", "assets/benchmark"),
+    ("assets/benchmark/source_manifest.json", "assets/benchmark"),
+]
+
 a = Analysis(
     ["core/main.py"],
     pathex=[SPECPATH],          # so `config` and `core.*` resolve at build time
     binaries=[],
-    datas=[],                   # lxml and pyproj data come from their own hooks
+    datas=_demo,                # + lxml and pyproj data come from their own hooks
     hiddenimports=hidden,
     hookspath=[],
     hooksconfig={},

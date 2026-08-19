@@ -5,23 +5,39 @@
     "model": "facebook/sam2.1-hiera-small",
     "type": "lane_count_estimate",
     "feature": "lane_count",
-    "value": 15,
+    "value": 5,
     "geometry_kind": "georeferenced",
     "attached_to": {
-      "road_id": "rt-road-47572742#4"
+      "road_id": "rt-road-568057022#0"
     },
-    "confidence": 0.431,
+    "confidence": 0.554,
     "status": "REVIEW",
+    "provenance": {
+      "mode": "packaged_static_demo",
+      "note": "Pre-computed P7 aerial + SAM 2.1 evidence, shipped as static demo evidence. The installed build does NOT run live SAM inference (the vision environment and aerial imagery are dev-only). This observation reproduces the verified P7 positive result on the GST Road benchmark network.",
+      "imagery": {
+        "source": "Esri World Imagery (aerial-xyz)",
+        "zoom": 19,
+        "meters_per_pixel": 0.2911,
+        "crs": "EPSG:4326",
+        "mosaic": "mosaic.png",
+        "road_mask": "road_mask.geojson",
+        "transform": "source_manifest.json"
+      },
+      "osm_baseline_lanes": 4
+    },
     "evidence": {
       "feature": "lane_count",
-      "value": 15,
-      "raw_estimate": 14.72,
-      "measured_width_m": 51.53,
+      "value": 5,
+      "raw_estimate": 5.16,
+      "measured_width_m": 18.05,
       "assumed_lane_width_m": 3.5,
-      "samples": 30,
-      "samples_used": 24,
-      "width_cv": 0.176,
-      "confidence": 0.431,
+      "max_plausible_lanes": 8,
+      "samples": 28,
+      "samples_used": 22,
+      "overlap_ratio": 0.903,
+      "width_cv": 0.138,
+      "confidence": 0.554,
       "method": "mask width perpendicular to OSM centerline / nominal lane width"
     }
   }
