@@ -358,6 +358,16 @@ def build_model(body: BuildRequest) -> dict:
         xodr_file = build_dir / "road_network.xodr"
         plain_to_net(plain, net_file, xodr_out=xodr_file)
 
+        # A new network invalidates network-dependent artifacts from any prior
+        # location. plain_to_net raised on failure, so reaching here means the
+        # build succeeded and network.net.xml is fresh. Remove the stale
+        # routes.rou.xml (its edges may not exist in this network -> SUMO
+        # "edge ... is not known") and the edge-specific closure.add.xml, so the
+        # next /demand/generate regenerates demand for THIS network rather than
+        # serving cached routes built against the previous location.
+        (build_dir / "routes.rou.xml").unlink(missing_ok=True)
+        (build_dir / "closure.add.xml").unlink(missing_ok=True)
+
         # 3. Build canonical model
         location = Location(
             name=loc_data["name"],
@@ -546,8 +556,9 @@ def run_experiment_endpoint(body: ExperimentRequest) -> dict:
         raise HTTPException(status_code=412, detail="Network not built.")
     if not routes_file.exists():
         raise HTTPException(status_code=412, detail="Routes not generated. POST /demand/generate first.")
-    if not closure_file.exists():
-        raise HTTPException(status_code=412, detail="Scenario not built. POST /scenario/build first.")
+    # NOTE: no closure_file precondition -- this endpoint builds closure.add.xml
+    # itself from the requested edge/lane a few lines below (build_lane_closure),
+    # so requiring it to pre-exist was contradictory and broke a fresh project.
 
     try:
         from config import SIM, CLOSURE
@@ -955,10 +966,22 @@ def export_zip() -> dict:
 
 # ── entry point ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    port = int(os.environ.get("ROADTWIN_PORT", "8765"))
-    uvicorn.run(
-        "core.main:app",
-        host="127.0.0.1",
-        port=port,
-        log_level="warning",
-    )
+    # Frozen re-exec guard. Subprocess calls (e.g. demand generation launching
+    # SUMO's randomTrips.py in core/sim/demand.py) use sys.executable, which is
+    # THIS exe when frozen by PyInstaller -- not a Python interpreter. If we were
+    # handed a .py script, act as a Python runner and execute it, instead of
+    # starting a SECOND API server on the port the parent sidecar already owns
+    # (which fails with WinError 10048). Dev is unaffected: there sys.executable
+    # is the venv python, so this branch never runs.
+    if getattr(sys, "frozen", False) and len(sys.argv) > 1 and sys.argv[1].endswith(".py"):
+        import runpy
+        sys.argv = sys.argv[1:]                  # the script sees itself as argv[0]
+        runpy.run_path(sys.argv[0], run_name="__main__")
+    else:
+        port = int(os.environ.get("ROADTWIN_PORT", "8765"))
+        uvicorn.run(
+            "core.main:app",
+            host="127.0.0.1",
+            port=port,
+            log_level="warning",
+        )

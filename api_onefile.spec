@@ -50,6 +50,13 @@ hidden += [
     "uvicorn.lifespan.on",
 ]
 
+# The frozen exe doubles as a Python runner for SUMO's own tools (see the
+# re-exec guard in core/main.py __main__): demand generation launches
+# randomTrips.py, which imports sumolib, which imports stdlib `xml.etree`.
+# RoadTwin's own code uses lxml, so PyInstaller never collects stdlib xml on
+# its own -- pull the whole xml package in so the tool can run inside api.exe.
+hidden += collect_submodules("xml")
+
 a = Analysis(
     ["core/main.py"],
     pathex=[SPECPATH],          # so `config` and `core.*` resolve at build time
