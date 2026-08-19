@@ -995,8 +995,14 @@ if __name__ == "__main__":
         runpy.run_path(sys.argv[0], run_name="__main__")
     else:
         port = int(os.environ.get("ROADTWIN_PORT", "8765"))
+        # Pass the app OBJECT, not the "core.main:app" import string. When frozen,
+        # this file is the entry point and PyInstaller bundles it as __main__, so
+        # the dotted name "core.main" is not importable and uvicorn's string form
+        # dies with `Could not import module "core.main"` -- the packaged sidecar
+        # then never binds its port. The app instance is already in scope here, so
+        # hand it to uvicorn directly (no reload/workers are used).
         uvicorn.run(
-            "core.main:app",
+            app,
             host="127.0.0.1",
             port=port,
             log_level="warning",
