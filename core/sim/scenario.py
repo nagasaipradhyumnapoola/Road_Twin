@@ -83,6 +83,23 @@ def upstream_edges(net_file: str | Path, edge_id: str) -> list[str]:
     return sorted(ups)
 
 
+def downstream_edges(net_file: str | Path, edge_id: str) -> list[str]:
+    """Edges that `edge_id` feeds into. The mirror of upstream_edges().
+
+    Used to reject fringe edges when picking a closure candidate: an edge with
+    no downstream is where traffic LEAVES the network, and closing a lane there
+    cannot propagate congestion anywhere.
+    """
+    tree = etree.parse(str(net_file))
+    dns = set()
+    for c in tree.getroot().iter("connection"):
+        if c.get("from") == edge_id:
+            to = c.get("to")
+            if to and not to.startswith(":"):
+                dns.add(to)
+    return sorted(dns)
+
+
 # ---------------------------------------------------------------------------
 # scenario writing
 # ---------------------------------------------------------------------------
@@ -164,6 +181,22 @@ def pick_closure_candidate(net_file: str | Path, min_lanes: int = 2, min_length:
         (eid, d) for eid, d in edges.items()
         if d["num_lanes"] >= min_lanes and d["length_m"] >= min_length
     ]
+    # Reject fringe edges. An edge with no upstream is where traffic ENTERS the
+    # network and one with no downstream is where it LEAVES; closing a lane on
+    # either meters flow instead of obstructing it, which makes the network
+    # *faster* and the experiment meaningless. The P2 benchmark picked a 682 m
+    # entry edge purely because it was the longest, and reported a -1.6 %
+    # travel time -- a closure that helped. Require both directions.
+    connected = [
+        (eid, d) for eid, d in cands
+        if upstream_edges(net_file, eid) and downstream_edges(net_file, eid)
+    ]
+    if connected:
+        cands = connected
+    else:
+        print("[scenario] WARNING: no multi-lane edge has both upstream and "
+              "downstream connectivity; falling back to fringe candidates. The "
+              "closure may not produce a physically meaningful delta.")
     if not cands:
         return None
     cands.sort(key=lambda kv: (kv[1]["num_lanes"], kv[1]["length_m"]), reverse=True)
