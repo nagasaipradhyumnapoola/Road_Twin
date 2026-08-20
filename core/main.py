@@ -702,8 +702,14 @@ def review_queue() -> dict:
     if not observations:
         return {"items": [], "total": 0, "review_count": 0, "agreement_count": 0}
 
-    # Build baseline dictionary from plain.edg.xml or network
+    # Build baseline dictionary from plain.edg.xml or network. /model/build writes
+    # the plain substrate to proj/sumo/; run_benchmark and older builds used
+    # proj/build/. Check both so a freshly built packaged project (sumo/) resolves
+    # its baseline instead of silently falling through to an empty map (which drops
+    # every observation and shows "No Pending Discrepancies").
     plain_edg = proj / "build" / "plain.edg.xml"
+    if not plain_edg.exists():
+        plain_edg = proj / "sumo" / "plain.edg.xml"
     if not plain_edg.exists():
         plain_edg = proj / "plain.edg.xml"
     if not plain_edg.exists():
@@ -767,19 +773,28 @@ def review_decision(req: ReviewDecisionRequest) -> dict:
     road_id = target_obs.get("attached_to", {}).get("road_id", "")
     edge_id = road_id.replace("rt-road-", "") if road_id.startswith("rt-road-") else road_id
 
-    plain_edg = proj / "build" / "plain.edg.xml"
-    if not plain_edg.exists():
-        plain_edg = proj / "plain.edg.xml"
-    if not plain_edg.exists():
-        bench_edg = proj.parent / "benchmark" / "build" / "plain.edg.xml"
-        if bench_edg.exists():
+    # Locate the editable plain substrate. /model/build writes it to proj/sumo/;
+    # run_benchmark and older builds used proj/build/. Resolve from wherever it
+    # actually landed so the packaged (sumo/) and benchmark (build/) layouts both
+    # edit correctly; copy the benchmark project only as a last resort. ALL plain
+    # files (nod/con/tll) then come from this same dir, so the recompile below
+    # cannot mix a sumo/ edge file with a missing build/ node file.
+    plain_dir = None
+    for cand in (proj / "build", proj / "sumo", proj):
+        if (cand / "plain.edg.xml").exists():
+            plain_dir = cand
+            break
+    if plain_dir is None:
+        bench_build = proj.parent / "benchmark" / "build"
+        if (bench_build / "plain.edg.xml").exists():
             (proj / "build").mkdir(parents=True, exist_ok=True)
-            shutil.copy(bench_edg, proj / "build" / "plain.edg.xml")
-            plain_edg = proj / "build" / "plain.edg.xml"
-            if (proj.parent / "benchmark" / "build" / "plain.nod.xml").exists():
-                shutil.copy(proj.parent / "benchmark" / "build" / "plain.nod.xml", proj / "build" / "plain.nod.xml")
+            for _f in ("plain.edg.xml", "plain.nod.xml", "plain.con.xml", "plain.tll.xml"):
+                if (bench_build / _f).exists():
+                    shutil.copy(bench_build / _f, proj / "build" / _f)
+            plain_dir = proj / "build"
         else:
             raise HTTPException(status_code=500, detail="plain.edg.xml not found for editing.")
+    plain_edg = plain_dir / "plain.edg.xml"
 
     from core.model.edits import Edit, apply_edits, prune_stale_connections, write_validation_report
     from core.build.netconvert import plain_to_net
@@ -856,10 +871,10 @@ def review_decision(req: ReviewDecisionRequest) -> dict:
     xodr_file = proj / "road_network.xodr"
 
     plain_files = {
-        "nod": proj / "build" / "plain.nod.xml",
+        "nod": plain_dir / "plain.nod.xml",
         "edg": plain_edg,
-        "con": proj / "build" / "plain.con.xml" if (proj / "build" / "plain.con.xml").exists() else None,
-        "tll": proj / "build" / "plain.tll.xml" if (proj / "build" / "plain.tll.xml").exists() else None,
+        "con": (plain_dir / "plain.con.xml") if (plain_dir / "plain.con.xml").exists() else None,
+        "tll": (plain_dir / "plain.tll.xml") if (plain_dir / "plain.tll.xml").exists() else None,
     }
     # A lane reduction leaves connections referencing removed lanes; prune them
     # so netconvert does not abort on "Lane index is larger than number of lanes".
@@ -925,6 +940,8 @@ def review_replay() -> dict:
         if bench_rep.exists():
             report_path = bench_rep
 
+    if not plain_edg.exists():
+        plain_edg = proj / "sumo" / "plain.edg.xml"   # /model/build writes here
     if not plain_edg.exists():
         bench_edg = proj.parent / "benchmark" / "build" / "plain.edg.xml"
         if bench_edg.exists():
