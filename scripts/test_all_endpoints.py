@@ -117,11 +117,19 @@ def run_comprehensive_check():
 
     # 14. Export ZIP
     # Make sure metrics.json exists for packaging
-    metrics_file = ROOT / "projects" / "benchmark" / "metrics.json"
-    if metrics_file.exists():
-        active_metrics = ROOT / "projects" / "active" / "metrics.json"
-        import shutil
-        shutil.copy(metrics_file, active_metrics)
+    active_metrics = ROOT / "projects" / "active" / "metrics.json"
+    if not active_metrics.exists():
+        benchmark_metrics = ROOT / "projects" / "benchmark" / "metrics.json"
+        if benchmark_metrics.exists():
+            import shutil
+            shutil.copy(benchmark_metrics, active_metrics)
+        else:
+            sample_metrics = {
+                "baseline": {"avg_travel_time_s": 42.1, "mean_queue_length_m": 18.2, "completed_vehicles": 100},
+                "scenario": {"avg_travel_time_s": 56.4, "mean_queue_length_m": 47.6, "completed_vehicles": 95},
+                "comparison": {"significant": True, "rows": []},
+            }
+            active_metrics.write_text(json.dumps(sample_metrics, indent=2), encoding="utf-8")
 
     r = client.post("/export/zip")
     assert r.status_code == 200, f"Export zip failed: {r.text}"

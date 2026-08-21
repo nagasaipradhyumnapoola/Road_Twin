@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import sys
 import os
+import time
 from pathlib import Path
 
 # ── path setup ────────────────────────────────────────────────────────────────
@@ -85,6 +86,11 @@ class HealthResponse(BaseModel):
 
 class GeocodeRequest(BaseModel):
     query: str
+
+
+class ReverseGeocodeRequest(BaseModel):
+    lat: float
+    lon: float
 
 
 class GeocandiDate(BaseModel):
@@ -277,6 +283,21 @@ def geocode(body: GeocodeRequest) -> list[GeocandiDate]:
     return [GeocandiDate(**r) for r in results]
 
 
+@app.post("/location/reverse")
+def reverse_geocode_endpoint(body: ReverseGeocodeRequest) -> dict:
+    """Lat/Lon → display name via Nominatim reverse geocode."""
+    try:
+        from core.acquire.geocoder import reverse_geocode as _rev_geo
+        from config import OVERPASS, ASSETS
+        cache_dir = ASSETS / "geocache"
+        res = _rev_geo(body.lat, body.lon, user_agent=OVERPASS["user_agent"], cache_dir=cache_dir)
+        if res and res.get("display_name"):
+            return res
+        return {"display_name": "", "lat": body.lat, "lon": body.lon}
+    except Exception:
+        return {"display_name": "", "lat": body.lat, "lon": body.lon}
+
+
 @app.post("/location/confirm")
 def confirm_location(body: ConfirmRequest) -> dict:
     """Write location.json. Gates all downstream pipeline calls.
@@ -317,6 +338,7 @@ def acquire_osm(body: AcquireRequest) -> dict:
         lat, lon, radius = loc["lat"], loc["lon"], loc.get("aoi_radius_m", 500)
         bbox = bbox_from_point(lat, lon, radius)
         proj = _project_dir()
+        _t = time.perf_counter()
         osm_path = fetch_osm(
             bbox,
             out_path=proj / "network.osm",
@@ -326,6 +348,12 @@ def acquire_osm(body: AcquireRequest) -> dict:
             cache_dir=ASSETS / "osm_cache",
             allow_network=True,
         )
+        # P10 — record the real acquisition time into the modeling benchmark.
+        try:
+            from core import benchmark as BM
+            BM.update_stage(proj, "acquisition_s", time.perf_counter() - _t)
+        except Exception:
+            pass
         return {"ok": True, "osm_path": str(osm_path),
                 "size_kb": round(osm_path.stat().st_size / 1024, 1)}
     except Exception as exc:
@@ -351,12 +379,16 @@ def build_model(body: BuildRequest) -> dict:
         build_dir.mkdir(exist_ok=True)
 
         # 1. OSM → plain XML  (returns dict[str, Path])
+        _t = time.perf_counter()
         plain = osm_to_plain(osm_path, build_dir)
+        _model_gen_s = time.perf_counter() - _t
 
         # 2. plain XML → net.xml + xodr
         net_file = build_dir / "network.net.xml"
         xodr_file = build_dir / "road_network.xodr"
+        _t = time.perf_counter()
         plain_to_net(plain, net_file, xodr_out=xodr_file)
+        _compile_s = time.perf_counter() - _t
 
         # A new network invalidates network-dependent artifacts from any prior
         # location. plain_to_net raised on failure, so reaching here means the
@@ -378,6 +410,15 @@ def build_model(body: BuildRequest) -> dict:
             confirmation_method=loc_data.get("confirmation_method", "user"),
         )
         model = build_from_net(net_file, location, proj, osm_file=osm_path)
+
+        # P10 — record the real modeling + compilation times and network size.
+        try:
+            from core import benchmark as BM
+            BM.update_stage(proj, "model_generation_s", _model_gen_s)
+            BM.update_stage(proj, "compilation_s", _compile_s)
+            BM.set_network(proj, net_file)
+        except Exception:
+            pass
 
         return {
             "ok": True,
@@ -410,6 +451,32 @@ def network_geojson() -> dict:
     return result
 
 
+@app.get("/benchmark")
+def get_benchmark() -> dict:
+    """P10 — the modeling acceleration benchmark for the active project.
+
+    Real measured stage timings + network size + human effort. Falls back to the
+    bundled `benchmark` project so the panel has something to show before the
+    user has run their own pipeline. 404 only when neither has a record.
+    """
+    from core import benchmark as BM
+
+    proj = _project_dir()
+    record = BM.load(proj)
+    source = "active"
+    if record is None:
+        bench = proj.parent / "benchmark"
+        record = BM.load(bench)
+        source = "benchmark"
+    if record is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No benchmark recorded yet. Run the pipeline (acquire → build → export).",
+        )
+    record["source"] = source
+    return record
+
+
 
 # ── P6 experiment state (in-memory, single-project) ──────────────────────────
 # Stores the last experiment result so the UI can poll without re-running.
@@ -433,6 +500,19 @@ class ExperimentRequest(BaseModel):
     edge_id: str
     lane_index: int
     seeds: list[int] | None = None   # None → use config defaults
+
+
+class ScenarioCreateRequest(BaseModel):
+    """A what-if scenario definition (P11). parameters is type-specific; see
+    core.scenario.models.TYPE_SPECS (exposed at GET /scenario/types)."""
+    name: str
+    type: str
+    parameters: dict = Field(default_factory=dict)
+    seeds: list[int] | None = None   # None → use config defaults
+
+
+# ── P11 scenario state (in-memory, single-project) ───────────────────────────
+_scenario_state: dict = {"status": "idle"}   # idle | running | done | error
 
 
 # ── P6 routes ─────────────────────────────────────────────────────────────────
@@ -607,13 +687,171 @@ def run_experiment_endpoint(body: ExperimentRequest) -> dict:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+# ── P11 What-If Scenario Engine ──────────────────────────────────────────────
+
+def _scenario_summary(result: dict | None) -> dict | None:
+    """Compact headline for the scenario list, drawn only from real metrics."""
+    if not result:
+        return None
+    cmp = result.get("comparison")
+    if not cmp:
+        # baseline: report its own travel time, nothing to compare
+        b = result.get("baseline") or {}
+        return {"kind": "baseline",
+                "baseline_travel_time_s": b.get("avg_travel_time_s")}
+    tt = next((r for r in cmp.get("rows", [])
+               if r.get("metric") == "Average travel time"), None)
+    return {
+        "kind": "comparison",
+        "travel_time_delta_pct": tt.get("delta_pct") if tt else None,
+        "significant": cmp.get("significant"),
+    }
+
+
+@app.get("/scenario/types")
+def scenario_types() -> dict:
+    """Type catalogue that drives the New Scenario form + validation."""
+    from config import SIM
+    from core.scenario.models import SCENARIO_TYPES, TYPE_SPECS
+    return {
+        "types": [{"type": t, **TYPE_SPECS[t]} for t in SCENARIO_TYPES],
+        "seeds_default": SIM["seeds"],
+    }
+
+
+@app.get("/scenario/list")
+def scenario_list() -> dict:
+    """All scenarios (baseline first), each with a compact result summary."""
+    _require_location()
+    from config import SIM
+    from core.scenario import registry as R
+
+    proj = _project_dir()
+    R.ensure_baseline(proj, SIM["seeds"])   # list is never empty
+    items = []
+    for s in R.list_scenarios(proj):
+        res = R.load_result(proj, s.scenario_id)
+        items.append({
+            "scenario": s.to_dict(),
+            "has_result": res is not None,
+            "summary": _scenario_summary(res),
+        })
+    return {"scenarios": items, "total": len(items)}
+
+
+@app.post("/scenario/create")
+def scenario_create(body: ScenarioCreateRequest) -> dict:
+    """Validate + persist a scenario definition (no simulation yet)."""
+    _require_location()
+    from config import SIM
+    from core.scenario import registry as R
+    from core.scenario.models import Scenario
+    from core.scenario.validator import validate
+
+    proj = _project_dir()
+    net_file = _get_net_file()
+    seeds = body.seeds if body.seeds else SIM["seeds"]
+
+    scenario = Scenario(
+        scenario_id=R.next_id(proj), name=body.name, type=body.type,
+        parameters=body.parameters or {}, seeds=list(seeds),
+    )
+    try:
+        validate(scenario, net_file)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    R.save(proj, scenario)
+    return {"ok": True, "scenario": scenario.to_dict()}
+
+
+@app.get("/scenario/status")
+def scenario_status() -> dict:
+    """Poll the current scenario run (idle | running | done | error)."""
+    return _scenario_state
+
+
+@app.get("/scenario/{scenario_id}")
+def scenario_get(scenario_id: str) -> dict:
+    """One scenario definition plus its last result, if any."""
+    _require_location()
+    from config import SIM
+    from core.scenario import registry as R
+
+    proj = _project_dir()
+    if scenario_id == R.BASELINE_ID:
+        R.ensure_baseline(proj, SIM["seeds"])   # materialize on first access
+    s = R.load(proj, scenario_id)
+    if not s:
+        raise HTTPException(status_code=404, detail=f"Scenario '{scenario_id}' not found.")
+    return {"scenario": s.to_dict(), "result": R.load_result(proj, scenario_id)}
+
+
+@app.post("/scenario/{scenario_id}/run")
+def scenario_run(scenario_id: str) -> dict:
+    """Run a scenario end-to-end (baseline + scenario arms) and store the result.
+
+    Synchronous and heavy, like /experiment/run: it blocks until every seed
+    completes. Poll /scenario/status meanwhile. Numbers are real SUMO output.
+    """
+    global _scenario_state
+    if _scenario_state.get("status") == "running":
+        raise HTTPException(status_code=409,
+                            detail="A scenario is already running. Wait for it to finish.")
+
+    _require_location()
+    from config import SIM
+    from core.scenario import engine, registry as R
+
+    proj = _project_dir()
+    if scenario_id == R.BASELINE_ID:
+        R.ensure_baseline(proj, SIM["seeds"])   # materialize on first access
+    scenario = R.load(proj, scenario_id)
+    if not scenario:
+        raise HTTPException(status_code=404, detail=f"Scenario '{scenario_id}' not found.")
+
+    net_file = _get_net_file()
+    base_routes = proj / "sumo" / "routes.rou.xml"
+    if not base_routes.exists():
+        raise HTTPException(status_code=412,
+                            detail="Routes not generated. POST /demand/generate first.")
+
+    work_dir = proj / "sumo" / "scenarios" / scenario_id
+    _scenario_state = {"status": "running", "scenario_id": scenario_id}
+    try:
+        result = engine.execute(
+            scenario, net_file=net_file, base_routes=base_routes, work_dir=work_dir,
+        )
+        R.save_result(proj, scenario_id, result)
+        _scenario_state = {"status": "done", "scenario_id": scenario_id}
+        return {"ok": True, "result": result}
+    except ValueError as exc:
+        _scenario_state = {"status": "error", "scenario_id": scenario_id, "detail": str(exc)}
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        _scenario_state = {"status": "error", "scenario_id": scenario_id, "detail": str(exc)}
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 # ── Vision Endpoints (Phase 7) ────────────────────────────────────────────────
+
+def _get_vision_python() -> Path | None:
+    candidates = [
+        _base / ".venv-vision" / "Scripts" / "python.exe",
+        _base.parent / "RoadTwin" / ".venv-vision" / "Scripts" / "python.exe",
+        _base.parent / ".venv-vision" / "Scripts" / "python.exe",
+    ]
+    for c in candidates:
+        if c.exists():
+            return c
+    return None
+
 
 @app.get("/vision/status")
 def vision_status() -> dict:
     """Check if vision environment and model weights are ready."""
-    vision_python = _base / ".venv-vision" / "Scripts" / "python.exe"
-    has_venv = vision_python.exists()
+    vision_python = _get_vision_python()
+    has_venv = vision_python is not None
     return {
         "available": has_venv,
         "venv_path": str(vision_python) if has_venv else None,
@@ -627,8 +865,8 @@ def vision_run(edge_id: str | None = None, zoom: int = 18) -> dict:
     _require_location()
     proj = _project_dir()
 
-    vision_python = _base / ".venv-vision" / "Scripts" / "python.exe"
-    if not vision_python.exists():
+    vision_python = _get_vision_python()
+    if not vision_python:
         raise HTTPException(status_code=503,
                             detail="Vision environment not configured (.venv-vision missing).")
 
@@ -988,9 +1226,16 @@ def export_zip() -> dict:
 
         EX.write_source_manifest(proj, prov.entries)
         EX.write_readme(proj, location=loc_data, results_table=table)
+        _t = time.perf_counter()
         zip_path = EX.export_project(
             proj, proj.parent / "RoadTwin_Project_export.zip"
         )
+        # P10 — record the real export time into the modeling benchmark.
+        try:
+            from core import benchmark as BM
+            BM.update_stage(proj, "export_s", time.perf_counter() - _t)
+        except Exception:
+            pass
         return {"ok": True, "zip_path": str(zip_path),
                 "size_kb": round(zip_path.stat().st_size / 1024, 1)}
     except Exception as exc:

@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import config as C                                          # noqa: E402
+from core import benchmark as BM                            # noqa: E402
 from core import provenance as P                            # noqa: E402
 from core.acquire import overpass                           # noqa: E402
 from core.build import netconvert as NC                     # noqa: E402
@@ -71,6 +72,10 @@ def main() -> int:
 
     seeds = C.SIM["seeds"][: args.seeds] if args.seeds else C.SIM["seeds"]
 
+    # P10 — real measured stage timings for the acceleration benchmark. Each
+    # entry is captured from the same wall-clock the step already prints.
+    timings: dict[str, float] = {}
+
     # -- 1 location ---------------------------------------------------------
     t = step(1, f"LOCATION  {C.BENCHMARK['name']}")
     location = {
@@ -99,6 +104,7 @@ def main() -> int:
     )
     prov.add(P.record(source="osm", tool="overpass", outputs=[osm],
                       extra={"bbox": list(bbox), "endpoint": C.OVERPASS["endpoint"]}))
+    timings["acquisition_s"] = time.time() - t
     print(f"    ({time.time()-t:.1f}s)")
 
     # -- 3 build ------------------------------------------------------------
@@ -110,6 +116,7 @@ def main() -> int:
     prov.add(P.record(source="netconvert", tool="netconvert", inputs=[osm],
                       outputs=[plain["net"], plain["edg"], plain["nod"]]))
     edges = scenario.read_net_edges(plain["net"])
+    timings["model_generation_s"] = time.time() - t
     print(f"    {len(edges)} edges, "
           f"{sum(e['num_lanes'] for e in edges.values())} lanes  ({time.time()-t:.1f}s)")
     if not edges:
@@ -150,6 +157,7 @@ def main() -> int:
                           xodr_out=proj / "road_network.xodr")
     prov.add(P.record(source="netconvert", tool="netconvert",
                       inputs=[plain["edg"]], outputs=[out["net"], out["xodr"]]))
+    timings["compilation_s"] = time.time() - t
     print(f"    xodr = {out['xodr'].stat().st_size/1024:.0f} KB  ({time.time()-t:.1f}s)")
 
     t = step(7, "VERIFY  re-import our own OpenDRIVE (proves it is valid)")
@@ -157,6 +165,10 @@ def main() -> int:
     print(f"    OpenDRIVE round-trip: {'PASS' if ok else 'FAIL'}")
 
     if args.skip_sim:
+        # Record the modeling stages measured so far (no sim/export here). P10
+        # numbers stay real even on the fast Phase-0 gate.
+        BM.record_run(proj, timings=timings, net_file=out["net"])
+        print(f"    benchmark.json written (partial: modeling stages only)")
         code = skip_sim_exit_code(ok)
         if code:
             print("\n--skip-sim stopping here, but the OpenDRIVE round-trip FAILED.")
@@ -201,6 +213,7 @@ def main() -> int:
     )
     (proj / "metrics.json").write_text(json.dumps(
         {k: v for k, v in result.items() if k != "table"}, indent=2))
+    timings["simulation_s"] = time.time() - t
     print()
     print(result["table"])
     print(f"    ({time.time()-t:.1f}s)")
@@ -210,6 +223,10 @@ def main() -> int:
     EX.write_source_manifest(proj, prov.entries)
     EX.write_readme(proj, location=location, results_table=result["table"])
     zp = EX.export_project(proj, proj.parent / f"RoadTwin_Project_{args.project}.zip")
+    timings["export_s"] = time.time() - t
+
+    # P10 — write the complete acceleration benchmark from real measured stages.
+    BM.record_run(proj, timings=timings, net_file=out["net"], seeds=len(seeds))
 
     print(f"\n{'='*70}")
     print(f"DONE in {time.time()-t_all:.1f}s   ->  {zp}")

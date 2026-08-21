@@ -26,7 +26,7 @@ interface EdgeInfo {
   lanes: Array<{ id: string; index: number; length: number; speed: number }>;
 }
 
-interface ComparisonRow {
+export interface ComparisonRow {
   metric: string;
   unit: string;
   baseline: number | null;
@@ -35,7 +35,7 @@ interface ComparisonRow {
   delta_pct: number | null;
 }
 
-interface ComparisonResult {
+export interface ComparisonResult {
   rows: ComparisonRow[];
   n_seeds: number;
   significant: boolean;
@@ -505,7 +505,7 @@ function InfoRow({ label, value, note }: { label: string; value: string; note?: 
   );
 }
 
-function ResultTable({
+export function ResultTable({
   comparison,
   scenario,
 }: {

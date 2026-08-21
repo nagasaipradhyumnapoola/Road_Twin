@@ -509,5 +509,7 @@ def format_table(cmp: dict[str, Any]) -> str:
                 f"n={nr['n']}"
             )
 
-    lines += ["", cmp["verdict"]]
+    verdict = cmp.get("verdict")
+    if verdict:
+        lines += ["", verdict]
     return "\n".join(lines)

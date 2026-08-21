@@ -170,6 +170,73 @@ def build_lane_closure(
     return desc
 
 
+def build_road_closure(
+    net_file: str | Path,
+    out_file: str | Path,
+    *,
+    edge_id: str,
+    begin: int = 300,
+    end: int = 3600,
+    include_upstream: bool = True,
+) -> dict:
+    """Write a WHOLE-EDGE closure additional-file (every lane of one edge).
+
+    Same ADR-006 principle as build_lane_closure: a closure is a rerouter, not a
+    network edit, so baseline and scenario load the identical network and routes
+    and the delta stays causal. Where closingLaneReroute shuts one lane,
+    ``closingReroute`` shuts the entire edge:
+
+        <rerouter id="rr" edges="UPSTREAM CLOSED">
+          <interval begin="300" end="3600">
+            <closingReroute id="CLOSED" allow="authority"/>
+          </interval>
+        </rerouter>
+
+    HONEST LIMITATION: if the closed edge is the ONLY path to some destinations,
+    the rerouter cannot divert those trips and they will teleport rather than
+    reroute. That is a real network property, reported (via teleport counts), not
+    hidden. Prefer an edge with a downstream alternative.
+    """
+    net_file, out_file = Path(net_file), Path(out_file)
+    edges = read_net_edges(net_file)
+
+    if edge_id not in edges:
+        raise ValueError(
+            f"Edge '{edge_id}' is not in the network. "
+            f"Available (first 10): {list(edges)[:10]}"
+        )
+    info = edges[edge_id]
+    trigger = [edge_id] + (upstream_edges(net_file, edge_id) if include_upstream else [])
+
+    root = etree.Element("additional")
+    rr = etree.SubElement(root, "rerouter", id=f"rr_roadclosure_{edge_id}",
+                          edges=" ".join(trigger))
+    iv = etree.SubElement(rr, "interval", begin=str(begin), end=str(end))
+    etree.SubElement(iv, "closingReroute", id=edge_id, allow="authority")
+
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+    etree.ElementTree(root).write(
+        str(out_file), pretty_print=True, xml_declaration=True, encoding="UTF-8"
+    )
+
+    desc = {
+        "edge_id": edge_id,
+        "lanes_on_edge": info["num_lanes"],
+        "actual_closed_length_m": round(info["length_m"], 1),
+        "begin": begin,
+        "end": end,
+        "trigger_edges": trigger,
+        "additional_file": str(out_file),
+        "note": (
+            f"Whole edge closed ({info['num_lanes']} lane(s), "
+            f"{info['length_m']:.0f} m) from {begin}s to {end}s."
+        ),
+    }
+    print(f"[scenario] closing edge {edge_id} ({info['length_m']:.0f} m) "
+          f"from {begin}s to {end}s")
+    return desc
+
+
 def pick_closure_candidate(net_file: str | Path, min_lanes: int = 2, min_length: float = 100.0):
     """Suggest a good edge to close: multi-lane, long, high priority.
 
