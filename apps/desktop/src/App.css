@@ -239,9 +239,31 @@ body {
   gap: 0;
 }
 
+.lg-map-wrap {
+  flex: 1;
+  position: relative;
+  display: flex;
+}
+
 .lg-map {
   flex: 1;
   background: var(--bg);
+}
+
+.lg-map-err {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 5;
+  max-width: 80%;
+  padding: 8px 14px;
+  border-radius: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 13px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
 }
 
 .lg-section { padding: 0 0 16px 0; }

@@ -148,6 +148,29 @@ def test_evidence():
     empty = np.zeros((H, W), dtype=bool)
     check("empty mask returns None", lane_count_evidence(empty, centre, mpp) is None)
 
+    # Physically implausible width must be refused, not reported as many lanes.
+    # This is the 51.53 m / 15-lane benchmark false positive, generalised: a mask
+    # wider than lane_width_m * max_lanes is a mask that bled off the carriageway.
+    wide, wide_c = band(60.0)          # 60 m -> ~17 lanes on one edge: absurd
+    check("implausible width (> max_lanes) refuses (insufficient)",
+          lane_count_evidence(wide, wide_c, mpp) is None,
+          "60 m band should be rejected as implausible")
+
+    # Poor road overlap -- the mask supports only part of the centerline. A
+    # consistent width over a mask that only grazed the road must NOT pass.
+    partial = np.zeros((H, W), dtype=bool)
+    _half = int(round((10.5 / mpp) / 2))
+    partial[H // 2 - _half: H // 2 + _half, :250] = True
+    check("poor road overlap refuses (insufficient)",
+          lane_count_evidence(partial, centre, mpp) is None,
+          "mask covering <50% of centerline should be rejected")
+
+    # A good result carries overlap_ratio, ~1.0 for a fully-supported mask.
+    good_ev = lane_count_evidence(*band(10.5), mpp)
+    check("evidence reports road overlap ratio",
+          good_ev is not None and good_ev.get("overlap_ratio", 0) >= 0.9,
+          f"overlap={good_ev.get('overlap_ratio') if good_ev else None}")
+
     obs = [{"id": "obs-001", "value": 3, "confidence": 0.82, "feature": "lane_count",
             "attached_to": {"road_id": "r1"}}]
     base = {"r1": {"lane_count": 2,

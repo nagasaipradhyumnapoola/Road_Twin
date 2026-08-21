@@ -76,67 +76,109 @@ def main() -> int:
     # -------------------------------------------------------------------------
     # 7.2 Georeferenced Mosaic (ADR-005)
     # -------------------------------------------------------------------------
-    t = step(2, "GEOREFERENCED MOSAIC (XYZ Tiles)")
+    t = step(2, "GEOREFERENCED MOSAIC (aerial XYZ tiles)")
     mosaic_png = vision_dir / "mosaic.png"
     cached_mosaic_png = benchmark_cache / "mosaic.png"
 
-    tile_url = os.environ.get(
-        "ROADTWIN_TILE_URL",
-        "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
-    )
-    user_agent = "RoadTwin-DigitalTwin-Research/0.1.0"
+    def _write_manifest(extra: dict) -> Path:
+        """Merge into source_manifest.json -- never clobber sibling keys."""
+        mf = proj / "source_manifest.json"
+        data: dict = {}
+        if mf.exists():
+            try:
+                loaded = json.loads(mf.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    data = loaded
+            except Exception:
+                data = {}
+        data.update(extra)
+        mf.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        return mf
 
-    # Plan mosaic
+    def _insufficient(reason: str, imagery_meta: dict) -> int:
+        """Honest refusal: no mosaic, mask, or lane count is fabricated."""
+        (proj / "observations.json").write_text("[]", encoding="utf-8")
+        _write_manifest({
+            "imagery": imagery_meta,
+            "vision_status": {"sufficient": False, "reason": reason},
+        })
+        print(f"\n    [INSUFFICIENT EVIDENCE] {reason}", flush=True)
+        print("    observations.json = []  (no road or lane count invented).", flush=True)
+        print(f"\n{'='*70}\nPHASE 7 COMPLETE (insufficient evidence) in "
+              f"{time.time()-t_all:.1f}s\n{'='*70}", flush=True)
+        return 0
+
+    # --- Aerial imagery gate (ADR-005 / P7) -------------------------------------
+    # Lane WIDTH is a physical measurement; it can only come from genuine overhead
+    # imagery. An OSM cartographic raster draws roads as fixed-width casings, so
+    # measuring it yields nonsense (the 51 m / 15-lane benchmark artifact). Require
+    # an explicitly-declared aerial source; otherwise refuse. Never substitute
+    # street tiles silently.
+    tile_url = C.IMAGERY.get("tile_url", "").strip()
+    user_agent = C.IMAGERY.get("user_agent") or "RoadTwin-DigitalTwin-Research/0.1.0"
+    declared_aerial = bool(C.IMAGERY.get("aerial", False))
+    _cartographic_hints = ("openstreetmap.org", "opentopomap", "cartocdn",
+                           "stamen", "wikimedia.org/osm", "/osm/")
+    host = tile_url.split("/")[2] if "://" in tile_url else (tile_url[:48] or "<unset>")
+    is_cartographic = (not tile_url) or any(h in tile_url.lower() for h in _cartographic_hints)
+    aerial_ok = bool(tile_url) and declared_aerial and not is_cartographic
+    imagery_meta = {
+        "tile_url_host": host,
+        "declared_aerial": declared_aerial,
+        "cartographic_source": is_cartographic,
+        "aerial": aerial_ok,
+        "source": "aerial-xyz" if aerial_ok else ("cartographic-osm" if is_cartographic else "unknown"),
+        "user_agent": user_agent,
+        "crs": "EPSG:4326",
+    }
+    print(f"    Imagery source: host={host} declared_aerial={declared_aerial} "
+          f"cartographic={is_cartographic} -> aerial_ok={aerial_ok}")
+    if not aerial_ok:
+        return _insufficient(
+            "no aerial imagery source configured (set ROADTWIN_TILE_URL to an "
+            "aerial/satellite XYZ provider and ROADTWIN_TILE_AERIAL=1). OSM "
+            "cartographic tiles are not measurable for lane width.",
+            imagery_meta,
+        )
+
     m_planned = tiles.plan_mosaic(bbox, args.zoom)
     print(f"    Planned: {m_planned.width_px}x{m_planned.height_px}px @ zoom {args.zoom} ({m_planned.meters_per_pixel():.3f} m/px)")
 
-    if args.offline and cached_mosaic_png.exists():
-        import shutil
-        shutil.copy(cached_mosaic_png, mosaic_png)
-        mosaic = m_planned
-        print(f"    [tiles] offline cache hit -> {mosaic_png.name}", flush=True)
-    elif cached_mosaic_png.exists() and not args.offline:
-        import shutil
-        shutil.copy(cached_mosaic_png, mosaic_png)
-        mosaic = m_planned
-        print(f"    [tiles] using cached benchmark mosaic -> {mosaic_png.name}", flush=True)
-    else:
-        try:
-            mosaic = tiles.fetch_mosaic(
-                bbox,
-                args.zoom,
-                tile_url,
-                mosaic_png,
-                user_agent=user_agent,
-                max_tiles=64,
-                cache_dir=benchmark_cache / "tiles",
-            )
-            # Copy to benchmark cache
-            if mosaic_png.exists():
-                import shutil
-                shutil.copy(mosaic_png, cached_mosaic_png)
-        except Exception as exc:
-            print(f"    [tiles] Live tile download failed: {exc}. Generating synthetic benchmark canvas...", flush=True)
-            from PIL import Image, ImageDraw
-            canvas = Image.new("RGB", (m_planned.width_px, m_planned.height_px), color=(40, 45, 50))
-            draw = ImageDraw.Draw(canvas)
-            # Draw synthetic corridor
-            cx, cy = m_planned.width_px // 2, m_planned.height_px // 2
-            draw.line([(0, cy), (m_planned.width_px, cy)], fill=(80, 85, 90), width=45)
-            canvas.save(mosaic_png)
-            mosaic = m_planned
+    # Always stitch from the per-TILE cache; the whole-mosaic shortcut is gone
+    # because a filename+size key silently served a stale mosaic under a different
+    # location or a dead host. The tile cache is keyed by z/x/y AND by imagery HOST
+    # -- a per-tile cache shared across sources would let a dead or swapped host
+    # silently reuse another provider's tiles, which is the same substitution one
+    # level down. A dead host therefore has an empty cache -> real fetch -> refuse.
+    import re as _re
+    host_slug = _re.sub(r"[^a-z0-9.]+", "_", host.lower()) or "unknown"
+    tile_cache_dir = benchmark_cache / f"tiles_{host_slug}"
+    try:
+        mosaic = tiles.fetch_mosaic(
+            bbox, args.zoom, tile_url, mosaic_png,
+            user_agent=user_agent,
+            max_tiles=int(C.IMAGERY.get("max_tiles", 64)),
+            cache_dir=tile_cache_dir,
+        )
+        if mosaic_png.exists():
+            import shutil
+            shutil.copy(mosaic_png, cached_mosaic_png)
+    except Exception as exc:
+        # No synthetic canvas. Imagery unavailable -> insufficient evidence.
+        return _insufficient(f"aerial tile download failed: {exc}", imagery_meta)
 
-    # Persist mosaic transform dictionary into source_manifest.json
-    manifest_file = proj / "source_manifest.json"
-    manifest = {}
-    if manifest_file.exists():
-        try:
-            manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
-        except Exception:
-            manifest = {}
-    manifest["mosaic"] = mosaic.to_dict()
-    manifest_file.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-    print(f"    Mosaic transform persisted to source_manifest.json  ({time.time()-t:.1f}s)", flush=True)
+    # Persist mosaic transform + imagery source (merge, so export cannot clobber).
+    import hashlib
+    try:
+        imagery_meta["mosaic_sha256"] = hashlib.sha256(mosaic_png.read_bytes()).hexdigest()
+    except Exception:
+        pass
+    _write_manifest({
+        "mosaic": mosaic.to_dict(),
+        "imagery": imagery_meta,
+        "vision_status": {"sufficient": True, "reason": "aerial imagery present"},
+    })
+    print(f"    Mosaic transform + imagery source persisted to source_manifest.json  ({time.time()-t:.1f}s)", flush=True)
 
     # -------------------------------------------------------------------------
     # 7.3 Centerline Extraction & Pixel Projection
@@ -214,15 +256,8 @@ def main() -> int:
         )
         print(f"    SAM inference completed on {mask.shape[1]}x{mask.shape[0]} canvas")
     except Exception as exc:
-        print(f"    [sam] Inference failed ({exc}). Using synthetic mask fallback...", flush=True)
-        import numpy as np
-        h, w = mosaic.height_px, mosaic.width_px
-        mask = np.zeros((h, w), dtype=bool)
-        # Create a synthetic road ribbon around the centerline
-        for x, y in valid_px:
-            ix, iy = int(round(x)), int(round(y))
-            if 0 <= iy < h and 0 <= ix < w:
-                mask[max(0, iy-20):min(h, iy+20), max(0, ix-20):min(w, ix+20)] = True
+        # No synthetic ribbon. SAM unavailable/failed -> insufficient evidence.
+        return _insufficient(f"SAM segmentation unavailable/failed: {exc}", imagery_meta)
 
     road_mask_geojson = segment.mask_to_geojson(mask, mosaic)
     mask_geojson_path.write_text(json.dumps(road_mask_geojson, indent=2), encoding="utf-8")
@@ -236,20 +271,30 @@ def main() -> int:
         mask,
         valid_px,
         mosaic.meters_per_pixel(),
-        lane_width_m=3.5,
+        lane_width_m=float(C.VISION.get("nominal_lane_width_m", 3.5)),
+        max_lanes=int(C.VISION.get("max_plausible_lanes", 8)),
     )
 
     if ev:
         print(f"    Measured width: {ev['measured_width_m']:.2f} m")
         print(f"    Estimated lanes: {ev['value']} (raw estimate: {ev['raw_estimate']:.2f})")
-        print(f"    Samples: {ev['samples_used']}/{ev['samples']} valid")
+        print(f"    Samples: {ev['samples_used']}/{ev['samples']} valid  (overlap {ev['overlap_ratio']:.2f})")
         print(f"    Confidence score: {ev['confidence']*100:.1f}%")
         obs_id = "obs-001"
         obs = evidence.make_observation(obs_id, ev, road_id=f"rt-road-{target_edge}")
         obs_list = [obs]
     else:
-        print("    [evidence] Insufficient clean samples -> Refused estimate (honest refusal)")
+        print("    [evidence] Insufficient/implausible evidence -> Refused estimate (honest refusal)")
         obs_list = []
+
+    # Final imagery/evidence status reflects the ACTUAL outcome, not merely that a
+    # mosaic was fetched. Aerial present but a refused mask -> sufficient=False.
+    _write_manifest({"vision_status": {
+        "sufficient": bool(obs_list),
+        "reason": ("lane evidence produced" if obs_list else
+                   "aerial imagery present but SAM mask yielded no plausible lane "
+                   "evidence (implausible width or insufficient road overlap)"),
+    }})
 
     # Write observations.json
     obs_file = proj / "observations.json"

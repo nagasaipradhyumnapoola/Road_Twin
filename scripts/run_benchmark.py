@@ -133,6 +133,12 @@ def main() -> int:
                     new_value=str(args.edit_lanes), source="accepted_vision",
                     observation_id="obs-001", confidence=0.82)
         ED.apply_edits(plain["edg"], [e])
+        # Reducing a lane count leaves the plain .con.xml referencing the removed
+        # lane; prune those before netconvert, or it aborts on "Lane index is
+        # larger than number of lanes". No-op for lane increases.
+        _, _pruned = ED.prune_stale_connections(plain["con"], plain["edg"])
+        if _pruned:
+            print(f"    pruned {_pruned} stale connection(s) after lane reduction")
         ED.write_validation_report([e], [], proj / "validation_report.json")
         prov.add(P.record(source="human", tool="human",
                           outputs=[proj / "validation_report.json"],
@@ -170,7 +176,14 @@ def main() -> int:
 
     # -- 9 scenario ---------------------------------------------------------
     t = step(9, "SCENARIO  lane closure additional-file")
-    closure_lane = cand["num_lanes"] - 1          # close the leftmost lane
+    # `cand` was measured BEFORE step 5, so an accepted lane edit (e.g.
+    # --edit-lanes 3 on this very edge) can have changed its lane count. Read
+    # the count back from the compiled network so the closure targets a lane
+    # that still exists. With no edit this is identical to cand["num_lanes"].
+    _edges_now = scenario.read_net_edges(out["net"])
+    _num_lanes_now = _edges_now.get(cand["edge_id"], {}).get(
+        "num_lanes", cand["num_lanes"])
+    closure_lane = _num_lanes_now - 1             # close the leftmost lane
     desc = scenario.build_lane_closure(
         out["net"], sumo_dir / "closure.add.xml",
         edge_id=cand["edge_id"], lane_index=closure_lane,

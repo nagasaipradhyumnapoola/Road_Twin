@@ -93,8 +93,10 @@ export function ExperimentWorkspace({
   // Configuration
   const [selectedEdge, setSelectedEdge] = useState("");
   const [selectedLane, setSelectedLane] = useState(0);
-  const [period, setPeriod]           = useState(0.3);    // demand period — tuned value
-  const [seedsStr, setSeedsStr]       = useState("42,43,44,45,46");
+  const [period, setPeriod]           = useState(3.0);    // calibrated demand period (config.py SIM.period)
+  const [seedsStr, setSeedsStr]       = useState(
+    "42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61"  // calibrated 20 seeds (config.py SIM.seeds = range(42,62))
+  );
 
   // Demand
   const [demandStatus, setDemandStatus] = useState<"none" | "generating" | "ready" | "error">("none");

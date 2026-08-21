@@ -2,30 +2,6 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import * as maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 
-// Reliable OSM raster style specification (works offline/online, no vector font dependencies)
-const OSM_STYLE: maplibregl.StyleSpecification = {
-  version: 8,
-  sources: {
-    "osm-tiles": {
-      type: "raster",
-      tiles: [
-        "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
-      ],
-      tileSize: 256,
-      attribution: "© OpenStreetMap contributors",
-    },
-  },
-  layers: [
-    {
-      id: "osm-tiles-layer",
-      type: "raster",
-      source: "osm-tiles",
-      minzoom: 0,
-      maxzoom: 19,
-    },
-  ],
-};
-
 interface Candidate {
   display_name: string;
   lat: number;
@@ -75,6 +51,8 @@ export function LocationGateway({ port, onConfirmed }: LocationGatewayProps) {
   const mapObj      = useRef<maplibregl.Map | null>(null);
   const markerRef   = useRef<maplibregl.Marker | null>(null);
   const circleRef   = useRef<maplibregl.GeoJSONSource | null>(null);
+  const aoiReady    = useRef(false);
+  const [mapErr, setMapErr] = useState("");
 
   // ── parse manual inputs safely ───────────────────────────────────────────
   const parseManual = useCallback((): { valid: boolean; lat: number; lon: number } => {
@@ -90,62 +68,85 @@ export function LocationGateway({ port, onConfirmed }: LocationGatewayProps) {
   useEffect(() => {
     if (!mapRef.current || mapObj.current) return;
 
-    let map: maplibregl.Map;
-    try {
-      map = new maplibregl.Map({
-        container: mapRef.current,
-        style: OSM_STYLE,
-        center: [lon, lat],
-        zoom: 15,
-        minZoom: 4,
-        maxZoom: 19,
-      });
-    } catch (e) {
-      console.error("Map initialization error:", e);
-      return;
-    }
+    const map = new maplibregl.Map({
+      container: mapRef.current,
+      // OSM raster tiles — universally reliable, no API key needed
+      style: {
+        version: 8,
+        sources: {
+          "osm-raster": {
+            type: "raster",
+            tiles: [
+              "https://a.tile.openstreetmap.org/{z}/{x}/{y}.png",
+              "https://b.tile.openstreetmap.org/{z}/{x}/{y}.png",
+              "https://c.tile.openstreetmap.org/{z}/{x}/{y}.png",
+            ],
+            tileSize: 256,
+            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+          },
+        },
+        layers: [
+          {
+            id: "osm-tiles",
+            type: "raster",
+            source: "osm-raster",
+            minzoom: 0,
+            maxzoom: 19,
+          },
+        ],
+      },
+      center: [lon, lat],
+      zoom: 15,
+    });
 
     map.addControl(new maplibregl.NavigationControl(), "top-right");
     map.addControl(new maplibregl.ScaleControl(), "bottom-left");
 
-    const setupLayers = () => {
-      if (!map.getSource("aoi-circle")) {
-        map.addSource("aoi-circle", {
-          type: "geojson",
-          data: buildCircleGeoJSON(lat, lon, radius),
-        });
-        map.addLayer({
-          id: "aoi-fill",
-          type: "fill",
-          source: "aoi-circle",
-          paint: { "fill-color": "#3b82f6", "fill-opacity": 0.08 },
-        });
-        map.addLayer({
-          id: "aoi-outline",
-          type: "line",
-          source: "aoi-circle",
-          paint: { "line-color": "#3b82f6", "line-width": 1.5, "line-dasharray": [4, 3] },
-        });
-        circleRef.current = map.getSource("aoi-circle") as maplibregl.GeoJSONSource;
-      }
-    };
+    // Marker does NOT depend on the style/tiles being parsed — attach it
+    // immediately so the site pin is visible even if tile loading stalls.
+    const el = document.createElement("div");
+    el.className = "rt-marker";
+    const marker = new maplibregl.Marker({ element: el, draggable: true })
+      .setLngLat([lon, lat])
+      .addTo(map);
+    marker.on("dragend", () => {
+      const { lng, lat: lt } = marker.getLngLat();
+      updateCoords(lt, lng, "drag");
+    });
+    markerRef.current = marker;
 
-    map.on("load", () => {
-      setupLayers();
-
-      // Draggable marker
-      const el = document.createElement("div");
-      el.className = "rt-marker";
-      const marker = new maplibregl.Marker({ element: el, draggable: true })
-        .setLngLat([lon, lat])
-        .addTo(map);
-
-      marker.on("dragend", () => {
-        const { lng, lat: lt } = marker.getLngLat();
-        updateCoords(lt, lng, "drag");
+    // AOI fill/outline DO need the style loaded (addSource/addLayer). Run the
+    // setup once the style is ready; guard so it never runs twice, and fall
+    // back to `idle` in case `load` is missed.
+    const setupAOI = () => {
+      if (aoiReady.current || !map.isStyleLoaded()) return;
+      aoiReady.current = true;
+      map.addSource("aoi-circle", {
+        type: "geojson",
+        data: buildCircleGeoJSON(lat, lon, radius),
       });
+      map.addLayer({
+        id: "aoi-fill",
+        type: "fill",
+        source: "aoi-circle",
+        paint: { "fill-color": "#3b82f6", "fill-opacity": 0.08 },
+      });
+      map.addLayer({
+        id: "aoi-outline",
+        type: "line",
+        source: "aoi-circle",
+        paint: { "line-color": "#3b82f6", "line-width": 1.5, "line-dasharray": [4, 3] },
+      });
+      circleRef.current = map.getSource("aoi-circle") as maplibregl.GeoJSONSource;
+    };
+    map.on("load", setupAOI);
+    map.on("idle", setupAOI);
 
-      markerRef.current = marker;
+    // Surface map/tile failures instead of leaving a silent blank canvas.
+    map.on("error", (e: { error?: { message?: string } }) => {
+      const msg = e?.error?.message ?? "Map failed to load tiles.";
+      console.error("[LocationGateway] MapLibre error:", msg);
+      setMapErr("Map tiles could not be loaded. Coordinates and Confirm still work.");
     });
 
     map.on("click", (e: maplibregl.MapMouseEvent) => {
@@ -164,11 +165,7 @@ export function LocationGateway({ port, onConfirmed }: LocationGatewayProps) {
     setTimeout(() => map.resize(), 500);
 
     mapObj.current = map;
-    return () => {
-      resizeObserver.disconnect();
-      map.remove();
-      mapObj.current = null;
-    };
+    return () => { map.remove(); mapObj.current = null; aoiReady.current = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -413,7 +410,10 @@ export function LocationGateway({ port, onConfirmed }: LocationGatewayProps) {
       </aside>
 
       {/* ── map ── */}
-      <div ref={mapRef} className="lg-map" />
+      <div className="lg-map-wrap">
+        <div ref={mapRef} className="lg-map" />
+        {mapErr && <div className="lg-map-err">{mapErr}</div>}
+      </div>
     </div>
   );
 }

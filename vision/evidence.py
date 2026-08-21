@@ -82,16 +82,27 @@ def lane_count_evidence(
     lane_width_m: float = 3.5,
     max_halfwidth_px: int = 200,
     min_samples: int = 5,
+    max_lanes: int = 8,
+    min_overlap: float = 0.5,
 ) -> dict[str, Any] | None:
     """Estimate lane count from mask width along the centerline.
 
-    Returns None when there is not enough usable evidence -- which is the
-    correct behaviour. Emitting a confident lane count from three noisy samples
-    is how you get caught.
+    Returns None when there is not enough usable evidence, OR when the evidence
+    is not physically defensible -- which is the correct behaviour. Emitting a
+    confident lane count from three noisy samples, or a 15-lane road from a mask
+    that bled off the carriageway, is how you get caught.
+
+    Three refusal gates, all returning None (== "insufficient evidence"):
+      * too few usable samples (min_samples)
+      * poor road overlap -- the centerline mostly missed the mask (min_overlap)
+      * physically implausible width -- raw lane estimate exceeds max_lanes, or
+        is below half a lane. The threshold is DERIVED from the lane-width model
+        (lane_width_m * max_lanes), not a hardcoded road.
     """
     if len(centerline_px) < 3:
         return None
 
+    interior = len(centerline_px) - 2
     widths_px: list[float] = []
     for i in range(1, len(centerline_px) - 1):
         normal = _unit_normal(centerline_px[i - 1], centerline_px[i + 1])
@@ -101,6 +112,13 @@ def lane_count_evidence(
             widths_px.append(wpx)
 
     if len(widths_px) < min_samples:
+        return None
+
+    # Road overlap: fraction of centerline sample points that actually landed on
+    # the mask. Low overlap means the mask is not this road (wrong object, or the
+    # centerline is not projected onto the carriageway) -> refuse.
+    overlap_ratio = len(widths_px) / max(interior, 1)
+    if overlap_ratio < min_overlap:
         return None
 
     arr = np.asarray(widths_px, dtype=float)
@@ -113,18 +131,29 @@ def lane_count_evidence(
     median_px = float(np.median(trimmed))
     width_m = median_px * meters_per_pixel
     raw_lanes = width_m / lane_width_m
+
+    # Physical plausibility gate. A width implying more than max_lanes lanes on a
+    # single directional edge -- or narrower than half a lane -- is not a road
+    # measurement, it is a mask that grabbed the wrong pixels. Refuse rather than
+    # report. (51.53 m / 3.5 m = 14.72 lanes > 8 -> rejected.)
+    if raw_lanes > max_lanes or raw_lanes < 0.5:
+        return None
+
     lanes = max(1, int(round(raw_lanes)))
 
-    # Confidence has two components:
+    # Confidence has three components:
     #   consistency -- how stable the width is along the road
     #   integrality -- how close the estimate is to a whole number of lanes
+    #   overlap     -- how much of the centerline the mask actually supports
+    # Plausibility is enforced as a hard gate above, so a physically absurd
+    # measurement gets NO usable confidence: it returns None instead. The overlap
+    # factor additionally prevents a consistent measurement over a mask that only
+    # grazed the road from scoring highly.
     cv = float(np.std(trimmed) / max(np.mean(trimmed), 1e-6))
     consistency = max(0.0, 1.0 - min(cv / 0.30, 1.0))
     integrality = 1.0 - 2.0 * abs(raw_lanes - round(raw_lanes))
-    # Weighted evenly on purpose. A width that sits halfway between 3 and 4
-    # lanes is exactly the case a human should adjudicate, so integrality must
-    # be able to drag confidence down even when the measurement is very stable.
-    confidence = round(max(0.0, min(1.0, 0.5 * consistency + 0.5 * integrality)), 3)
+    base = 0.5 * consistency + 0.5 * integrality
+    confidence = round(max(0.0, min(1.0, base * overlap_ratio)), 3)
 
     return {
         "feature": "lane_count",
@@ -132,8 +161,10 @@ def lane_count_evidence(
         "raw_estimate": round(raw_lanes, 2),
         "measured_width_m": round(width_m, 2),
         "assumed_lane_width_m": lane_width_m,
+        "max_plausible_lanes": max_lanes,
         "samples": len(widths_px),
         "samples_used": int(trimmed.size),
+        "overlap_ratio": round(overlap_ratio, 3),
         "width_cv": round(cv, 3),
         "confidence": confidence,
         "method": "mask width perpendicular to OSM centerline / nominal lane width",

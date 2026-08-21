@@ -33,9 +33,11 @@ if str(_base) not in sys.path:
 
 # ── imports ───────────────────────────────────────────────────────────────────
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # ── version ───────────────────────────────────────────────────────────────────
 __version__ = "0.2.0"
@@ -53,6 +55,23 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(RequestValidationError)
+def _clean_validation_error(request: Request, exc: RequestValidationError):
+    """Return a clean 422 that does not echo the raw input.
+
+    FastAPI's default handler puts the offending `input` back into the response.
+    For a NaN/Infinity latitude that value is not JSON-serialisable, so the
+    default response itself crashes with a 500 -- turning a correctly-rejected
+    request into a server error. Dropping `input` also avoids reflecting caller
+    data. The field/message/type still identify what was wrong.
+    """
+    errors = [
+        {"loc": e.get("loc"), "msg": e.get("msg"), "type": e.get("type")}
+        for e in exc.errors()
+    ]
+    return JSONResponse(status_code=422, content={"detail": errors})
 
 
 # ── request / response models ─────────────────────────────────────────────────
@@ -81,11 +100,22 @@ class GeocandiDate(BaseModel):
 
 
 class ConfirmRequest(BaseModel):
+    """A user confirming a map location. Validated at the request boundary so
+    invalid geography cannot reach location.json or any downstream operation.
+
+    `confirmation_method` is deliberately NOT a client field: the manual-map
+    flow is always a human confirmation, so the server stamps "user" itself.
+    Letting the client send it allowed a caller to write
+    confirmation_method="benchmark_config" and forge system-generated
+    provenance. `model_config` extra="ignore" (Pydantic default) means the
+    frontend still sending the field is harmless.
+    """
     name: str
-    lat: float
-    lon: float
-    aoi_radius_m: float = 500.0
-    confirmation_method: str = "user"
+    # allow_inf_nan=False rejects NaN/Infinity at the boundary; ge/le bound the
+    # geography. Both raise 422 before the handler runs.
+    lat: float = Field(ge=-90.0, le=90.0, allow_inf_nan=False)
+    lon: float = Field(ge=-180.0, le=180.0, allow_inf_nan=False)
+    aoi_radius_m: float = Field(default=500.0, gt=0.0, allow_inf_nan=False)
 
 
 class AcquireRequest(BaseModel):
@@ -98,11 +128,34 @@ class BuildRequest(BaseModel):
 
 # ── project directory helper ──────────────────────────────────────────────────
 
+def _data_root() -> Path:
+    """Where the app keeps PERSISTENT project state.
+
+    Frozen (PyInstaller onefile), config.PROJECTS_DIR resolves inside the
+    _MEIxxxx extraction dir, which is deleted on exit -- so a confirmed location
+    did not survive a restart of the installed app. Persist under a real
+    per-user data directory instead. Dev/source runs keep writing to the repo's
+    projects/ so nothing about the developer workflow changes.
+
+    ROADTWIN_DATA_DIR overrides everything (tests, custom installs).
+    """
+    env = os.environ.get("ROADTWIN_DATA_DIR")
+    if env:
+        return Path(env)
+    if getattr(sys, "frozen", False):
+        base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
+        root = Path(base) if base else (Path.home() / ".roadtwin")
+        return root / "RoadTwin"
+    # Dev/source: the directory that CONTAINS projects/ is the repo root, so
+    # _data_root()/projects/active == the original PROJECTS_DIR/active.
+    from config import ROOT as _ROOT
+    return _ROOT
+
+
 def _project_dir() -> Path:
     """Active project directory — always 'active' until multi-project support."""
     try:
-        from config import PROJECTS_DIR
-        p = PROJECTS_DIR / "active"
+        p = _data_root() / "projects" / "active"
         p.mkdir(parents=True, exist_ok=True)
         return p
     except Exception:
@@ -189,19 +242,44 @@ def get_location() -> dict:
 
 @app.post("/location/geocode")
 def geocode(body: GeocodeRequest) -> list[GeocandiDate]:
-    """Address → candidate list via Nominatim (rate-limited, cached)."""
+    """Address -> candidate list via Nominatim (rate-limited, cached).
+
+    An empty query is not an error -- it returns []. A reachable geocoder that
+    simply finds nothing also returns [] (the frontend shows "no matches").
+    Only an upstream FAILURE (network error, HTTP 4xx/5xx) becomes a 503, with
+    a clean application-level message -- never the raw upstream URL or traceback,
+    which leak internal detail and confuse the user.
+    """
+    import requests as _requests
+
+    from config import ASSETS, NOMINATIM_USER_AGENT
+    from core.acquire.geocoder import geocode as _geocode
+
+    if not body.query or not body.query.strip():
+        return []
+
     try:
-        from core.acquire.geocoder import geocode as _geocode
-        from config import OVERPASS, ASSETS
-        cache_dir = ASSETS / "geocache"
         results = _geocode(
             body.query,
-            user_agent=OVERPASS["user_agent"],
-            cache_dir=cache_dir,
+            user_agent=NOMINATIM_USER_AGENT,
+            cache_dir=ASSETS / "geocache",
         )
-        return [GeocandiDate(**r) for r in results]
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except (_requests.HTTPError, _requests.RequestException):
+        # Upstream refused, timed out, or is unreachable. Do not surface the URL
+        # or the exception text.
+        raise HTTPException(
+            status_code=503,
+            detail=("Address lookup is temporarily unavailable. "
+                    "Please try again, or enter coordinates manually."),
+        ) from None
+    except Exception:
+        raise HTTPException(
+            status_code=503,
+            detail=("Address lookup failed. "
+                    "Please enter coordinates manually."),
+        ) from None
+
+    return [GeocandiDate(**r) for r in results]
 
 
 @app.post("/location/reverse")
@@ -221,7 +299,11 @@ def reverse_geocode_endpoint(body: ReverseGeocodeRequest) -> dict:
 
 @app.post("/location/confirm")
 def confirm_location(body: ConfirmRequest) -> dict:
-    """Write location.json. Gates all downstream pipeline calls."""
+    """Write location.json. Gates all downstream pipeline calls.
+
+    The server assigns confirmation_method="user" -- this endpoint IS the manual
+    human-confirmation flow, so the provenance is not the client's to claim.
+    """
     data = {
         "name": body.name,
         "lat": body.lat,
@@ -229,9 +311,18 @@ def confirm_location(body: ConfirmRequest) -> dict:
         "aoi_radius_m": body.aoi_radius_m,
         "crs": "EPSG:4326",
         "confirmed": True,
-        "confirmation_method": body.confirmation_method,
+        "confirmation_method": "user",
     }
-    _location_path().write_text(json.dumps(data, indent=2), encoding="utf-8")
+    # allow_nan=False makes json.dumps RAISE rather than emit a bare NaN/Infinity
+    # token (which is invalid JSON that the frontend's JSON.parse cannot read).
+    # ConfirmRequest already rejects non-finite input, so this is belt-and-braces
+    # -- but it guarantees the file on disk is always strict JSON.
+    try:
+        payload = json.dumps(data, indent=2, allow_nan=False)
+    except ValueError as exc:
+        raise HTTPException(status_code=422,
+                            detail="Coordinates must be finite numbers.") from exc
+    _location_path().write_text(payload, encoding="utf-8")
     return {"ok": True, "location": data}
 
 
@@ -287,6 +378,16 @@ def build_model(body: BuildRequest) -> dict:
         xodr_file = build_dir / "road_network.xodr"
         plain_to_net(plain, net_file, xodr_out=xodr_file)
 
+        # A new network invalidates network-dependent artifacts from any prior
+        # location. plain_to_net raised on failure, so reaching here means the
+        # build succeeded and network.net.xml is fresh. Remove the stale
+        # routes.rou.xml (its edges may not exist in this network -> SUMO
+        # "edge ... is not known") and the edge-specific closure.add.xml, so the
+        # next /demand/generate regenerates demand for THIS network rather than
+        # serving cached routes built against the previous location.
+        (build_dir / "routes.rou.xml").unlink(missing_ok=True)
+        (build_dir / "closure.add.xml").unlink(missing_ok=True)
+
         # 3. Build canonical model
         location = Location(
             name=loc_data["name"],
@@ -296,7 +397,7 @@ def build_model(body: BuildRequest) -> dict:
             confirmed=True,
             confirmation_method=loc_data.get("confirmation_method", "user"),
         )
-        model = build_from_net(net_file, location, proj)
+        model = build_from_net(net_file, location, proj, osm_file=osm_path)
 
         return {
             "ok": True,
@@ -312,6 +413,7 @@ def build_model(body: BuildRequest) -> dict:
 @app.get("/network/geojson")
 def network_geojson() -> dict:
     """Return roads + junctions GeoJSON for the MapLibre overlay."""
+    _require_location()   # location-dependent, so gate it like its siblings
     proj = _project_dir()
     roads_path = proj / "roads.geojson"
     juncs_path = proj / "junctions.geojson"
@@ -474,8 +576,9 @@ def run_experiment_endpoint(body: ExperimentRequest) -> dict:
         raise HTTPException(status_code=412, detail="Network not built.")
     if not routes_file.exists():
         raise HTTPException(status_code=412, detail="Routes not generated. POST /demand/generate first.")
-    if not closure_file.exists():
-        raise HTTPException(status_code=412, detail="Scenario not built. POST /scenario/build first.")
+    # NOTE: no closure_file precondition -- this endpoint builds closure.add.xml
+    # itself from the requested edge/lane a few lines below (build_lane_closure),
+    # so requiring it to pre-exist was contradictory and broke a fresh project.
 
     try:
         from config import SIM, CLOSURE
@@ -710,7 +813,7 @@ def review_decision(req: ReviewDecisionRequest) -> dict:
         else:
             raise HTTPException(status_code=500, detail="plain.edg.xml not found for editing.")
 
-    from core.model.edits import Edit, apply_edits, write_validation_report
+    from core.model.edits import Edit, apply_edits, prune_stale_connections, write_validation_report
     from core.build.netconvert import plain_to_net
 
     report_path = proj / "validation_report.json"
@@ -790,56 +893,44 @@ def review_decision(req: ReviewDecisionRequest) -> dict:
         "con": proj / "build" / "plain.con.xml" if (proj / "build" / "plain.con.xml").exists() else None,
         "tll": proj / "build" / "plain.tll.xml" if (proj / "build" / "plain.tll.xml").exists() else None,
     }
+    # A lane reduction leaves connections referencing removed lanes; prune them
+    # so netconvert does not abort on "Lane index is larger than number of lanes".
+    if applied_edits and plain_files["con"] is not None:
+        prune_stale_connections(plain_files["con"], plain_edg)
     plain_to_net(plain_files, sumo_net, xodr_out=xodr_file)
 
     # 4. Write validation report
     write_validation_report(edits, observations, report_path)
 
-    # 5. Quick re-simulation to update metrics if routes exist
+    # 5. Re-simulation to refresh metrics on the edited network. The closure
+    #    additional lives under sumo/ next to the network; building it is INSIDE
+    #    the try so a closure-build or SUMO failure is reported (sim_error) rather
+    #    than raising a 500 after the model has already been mutated on disk.
     sim_result = None
-    routes_file = proj / "sumo" / "routes.rou.xml"
-    if not routes_file.exists():
-        routes_file = proj / "routes.rou.xml"
+    sim_error = None
+    routes_file = proj / "routes.rou.xml"
     if routes_file.exists():
-        from config import CLOSURE, SIM
+        from config import SIM, CLOSURE
         from core.sim import run, scenario
         closure_file = proj / "sumo" / "closure.add.xml"
-        if not closure_file.exists():
-            closure_file = proj / "closure.add.xml"
-        if not closure_file.exists():
-            scenario_json = proj / "scenario.json"
-            lane_idx = 0
-            if scenario_json.exists():
-                try:
-                    s_data = json.loads(scenario_json.read_text(encoding="utf-8"))
-                    lane_idx = s_data.get("lane_index", 0)
-                except Exception:
-                    lane_idx = 0
-            try:
+        try:
+            if not closure_file.exists():
                 scenario.build_lane_closure(
-                    sumo_net,
-                    closure_file,
-                    edge_id=edge_id,
-                    lane_index=lane_idx,
-                    begin=CLOSURE["begin"],
-                    end=CLOSURE["end"],
+                    sumo_net, closure_file,
+                    edge_id=edge_id, lane_index=0,
+                    begin=CLOSURE["begin"], end=CLOSURE["end"],
                 )
-            except Exception:
-                pass
-        if closure_file.exists():
-            try:
-                sim_result = run.run_experiment(
-                    sumo_net,
-                    routes_file,
-                    proj / "sumo" / "results",
-                    closure_file,
-                    seeds=SIM["seeds"][:1],
-                    begin=SIM["begin"],
-                    end=SIM["end"],
-                    closed_edge=edge_id,
-                )
-            except Exception:
-                sim_result = None
+            sim_result = run.run_experiment(
+                sumo_net, routes_file,
+                proj / "sumo" / "results",
+                closure_file,
+                seeds=[42],
+                begin=SIM["begin"], end=SIM["end"],
+                closed_edge=edge_id,
+            )
+        except Exception as exc:
+            sim_error = str(exc)
+            sim_result = None
 
     return {
         "ok": True,
@@ -849,6 +940,7 @@ def review_decision(req: ReviewDecisionRequest) -> dict:
         "new_value": new_val,
         "recompiled": True,
         "sim_result": sim_result,
+        "sim_error": sim_error,
     }
 
 
@@ -922,10 +1014,22 @@ def export_zip() -> dict:
 
 # ── entry point ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    port = int(os.environ.get("ROADTWIN_PORT", "8765"))
-    uvicorn.run(
-        "core.main:app",
-        host="127.0.0.1",
-        port=port,
-        log_level="warning",
-    )
+    # Frozen re-exec guard. Subprocess calls (e.g. demand generation launching
+    # SUMO's randomTrips.py in core/sim/demand.py) use sys.executable, which is
+    # THIS exe when frozen by PyInstaller -- not a Python interpreter. If we were
+    # handed a .py script, act as a Python runner and execute it, instead of
+    # starting a SECOND API server on the port the parent sidecar already owns
+    # (which fails with WinError 10048). Dev is unaffected: there sys.executable
+    # is the venv python, so this branch never runs.
+    if getattr(sys, "frozen", False) and len(sys.argv) > 1 and sys.argv[1].endswith(".py"):
+        import runpy
+        sys.argv = sys.argv[1:]                  # the script sees itself as argv[0]
+        runpy.run_path(sys.argv[0], run_name="__main__")
+    else:
+        port = int(os.environ.get("ROADTWIN_PORT", "8765"))
+        uvicorn.run(
+            "core.main:app",
+            host="127.0.0.1",
+            port=port,
+            log_level="warning",
+        )

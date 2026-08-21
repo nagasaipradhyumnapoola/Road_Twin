@@ -14,6 +14,24 @@ BENCHMARK_DIR = ASSETS / "benchmark"
 PROJECTS_DIR = ROOT / "projects"
 
 # ---------------------------------------------------------------------------
+# HTTP identity for public APIs (Nominatim, Overpass)
+# ---------------------------------------------------------------------------
+# Nominatim's usage policy REQUIRES an identifying User-Agent and returns 403
+# for obvious placeholders -- the old "contact: you@example.com" value was
+# blocked outright, which killed address geocoding. This identifies the app by
+# its public repository (legitimate identification, not a fabricated personal
+# contact) and is overridable so an operator can supply their own contact
+# without editing source. ROADTWIN_NOMINATIM_USER_AGENT wins for geocoding
+# specifically; ROADTWIN_USER_AGENT is the general fallback.
+_DEFAULT_USER_AGENT = (
+    "RoadTwin/0.1 (+https://github.com/nagasaipradhyumnapoola/Road_Twin)"
+)
+USER_AGENT = os.environ.get("ROADTWIN_USER_AGENT", _DEFAULT_USER_AGENT)
+NOMINATIM_USER_AGENT = os.environ.get(
+    "ROADTWIN_NOMINATIM_USER_AGENT", USER_AGENT
+)
+
+# ---------------------------------------------------------------------------
 # BENCHMARK LOCATION
 # ---------------------------------------------------------------------------
 # !! Day 0 task: VERIFY these coordinates before you build anything on them.
@@ -83,8 +101,16 @@ CLOSURE = {
 IMAGERY = {
     "zoom": 19,
     "tile_url": os.environ.get("ROADTWIN_TILE_URL", ""),
-    "user_agent": "RoadTwin-Desktop/0.2.0 (Windows; SIH-DigitalTwin)",
+    "user_agent": USER_AGENT,
     "max_tiles": 64,              # guard against accidental huge fetches
+    # Lane WIDTH cannot be measured from an OSM cartographic raster -- roads are
+    # drawn there as fixed-width casings, not real carriageways. The lane-evidence
+    # path therefore only runs on genuine overhead/aerial imagery, and only when
+    # the operator explicitly declares the configured tile source aerial. Unset,
+    # false, or a cartographic host -> the pipeline refuses (insufficient evidence)
+    # rather than inventing a lane count. Never silently substitute street tiles.
+    "aerial": os.environ.get("ROADTWIN_TILE_AERIAL", "").strip().lower()
+    in ("1", "true", "yes", "on"),
 }
 
 VISION = {
@@ -99,6 +125,12 @@ VISION = {
     "box_threshold": 0.35,
     "text_threshold": 0.25,
     "nominal_lane_width_m": 3.5,
+    # Physical plausibility ceiling for a single directional road edge. A SUMO
+    # edge is one direction; more than this many lanes on one carriageway edge
+    # means the mask has bled off the road, so the measurement is refused rather
+    # than reported. Derived bound = nominal_lane_width_m * max_plausible_lanes
+    # (=> 28 m). The 51.53 m / 15-lane benchmark false positive is rejected by it.
+    "max_plausible_lanes": 8,
 }
 
 # ---------------------------------------------------------------------------
@@ -106,6 +138,6 @@ VISION = {
 # ---------------------------------------------------------------------------
 OVERPASS = {
     "endpoint": "https://lz4.overpass-api.de/api/interpreter",
-    "user_agent": "RoadTwin-Desktop/0.2.0 (Windows; SIH-DigitalTwin)",
+    "user_agent": USER_AGENT,
     "timeout_s": 90,
 }
