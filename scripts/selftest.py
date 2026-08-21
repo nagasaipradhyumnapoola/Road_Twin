@@ -429,6 +429,25 @@ def test_scenario():
             except ValueError:
                 check(why, True)
 
+        # road closure — whole edge, closingReroute (P11)
+        from core.sim.scenario import build_road_closure
+        radd = d / "road.add.xml"
+        rdesc = build_road_closure(net, radd, edge_id="E1", begin=300, end=3600)
+        check("road closure file written", radd.exists())
+        check("road closure reports the actual edge length",
+              rdesc["actual_closed_length_m"] == 340.5)
+        rroot = etree.parse(str(radd)).getroot()
+        clr = rroot.find(".//closingReroute")
+        check("road closure emits closingReroute for the whole edge",
+              clr is not None and clr.get("id") == "E1")
+        check("road closure rerouter triggers on upstream too",
+              "E0" in rroot.find("rerouter").get("edges"))
+        try:
+            build_road_closure(net, d / "y.xml", edge_id="NOPE")
+            check("road closure: unknown edge refused", False, "no exception")
+        except ValueError:
+            check("road closure: unknown edge refused", True)
+
 
 # ===========================================================================
 GEONET = """<?xml version="1.0" encoding="UTF-8"?>
@@ -716,6 +735,196 @@ def test_export():
 
 
 # ===========================================================================
+BENCH_NET = """<?xml version="1.0" encoding="UTF-8"?>
+<net>
+  <edge id=":j2_0" function="internal">
+    <lane id=":j2_0_0" index="0" speed="13.89" length="5.00"/>
+  </edge>
+  <edge id="A" from="j1" to="j2" priority="10">
+    <lane id="A_0" index="0" speed="16.67" length="100.00"/>
+    <lane id="A_1" index="1" speed="16.67" length="100.00"/>
+  </edge>
+  <edge id="B" from="j2" to="j3" priority="10">
+    <lane id="B_0" index="0" speed="16.67" length="200.00"/>
+  </edge>
+  <junction id="j1" type="priority" x="0" y="0"/>
+  <junction id="j2" type="traffic_light" x="100" y="0"/>
+  <junction id="j3" type="dead_end" x="300" y="0"/>
+  <junction id=":j2_0" type="internal" x="100" y="0"/>
+</net>
+"""
+
+
+def test_benchmark():
+    section("core/benchmark.py  -- P10 acceleration record (no fabricated claim)")
+    import json as _json
+
+    from core import benchmark as BM
+
+    with tempfile.TemporaryDirectory() as td:
+        proj = Path(td)
+        net = proj / "network.net.xml"
+        net.write_text(BENCH_NET)
+
+        ns = BM.network_size_from_net(net)
+        check("network size: drivable edges counted as roads", ns["roads"] == 2, str(ns))
+        check("network size: lanes summed across edges", ns["lanes"] == 3, str(ns))
+        # j1 (priority) + j2 (traffic_light) are real; :j2_0 (internal) and
+        # j3 (dead_end) are excluded -- same rule the canonical model uses.
+        check("network size: internal + dead-end junctions excluded",
+              ns["junctions"] == 2, str(ns))
+
+        # human effort is computed live from project files, never fabricated
+        ha0 = BM.human_actions_from_project(proj)
+        check("human actions: zero when no files present",
+              ha0 == {"location_confirmation": 0, "evidence_reviews": 0, "manual_edits": 0},
+              str(ha0))
+
+        (proj / "location.json").write_text(_json.dumps({"confirmed": True, "name": "X"}))
+        (proj / "validation_report.json").write_text(_json.dumps({"decisions": [
+            {"user_action": "accept"}, {"user_action": "edit"},
+        ]}))
+        ha = BM.human_actions_from_project(proj)
+        check("human actions: confirmed location counts once",
+              ha["location_confirmation"] == 1)
+        check("human actions: reviews = number of decisions", ha["evidence_reviews"] == 2)
+        check("human actions: manual edits = decisions with action 'edit'",
+              ha["manual_edits"] == 1, str(ha))
+
+        # load returns None until a record with timings exists
+        check("load: None before any run recorded",
+              BM.load(proj) is None)
+
+        BM.record_run(proj, timings={
+            "acquisition_s": 12.4, "model_generation_s": 2.8,
+            "compilation_s": 4.1, "export_s": 1.7, "simulation_s": 30.0,
+        }, net_file=net, seeds=5)
+
+        rec = BM.load(proj)
+        check("load: returns a record after run", rec is not None)
+        # total is the sum of the MODELING stages only -- simulation is excluded
+        check("total_s = sum of modeling stages (sim excluded)",
+              rec["timings"]["total_s"] == 21.0, str(rec["timings"]["total_s"]))
+        check("simulation reported separately, not in total",
+              rec["timings"]["simulation_s"] == 30.0)
+        check("network size embedded in record", rec["network"]["roads"] == 2)
+        check("human actions merged live into record",
+              rec["human_actions"]["manual_edits"] == 1)
+        check("location merged live into record", rec["location"]["name"] == "X")
+
+        # the "no unsupported speed claim" rule, enforced not asserted: a
+        # forbidden comparative field must never survive to disk
+        raw = _json.loads((proj / "benchmark.json").read_text())
+        forbidden = {"manual_baseline", "speedup", "faster", "times_faster"}
+        check("record on disk carries no fabricated speed-claim field",
+              not (forbidden & set(raw)) and not (forbidden & set(raw.get("timings", {}))),
+              str(sorted(raw)))
+
+        # and the writer strips one even if a caller sneaks it in
+        raw["speedup"] = "10x"
+        (proj / "benchmark.json").write_text(_json.dumps(raw))
+        BM.update_stage(proj, "export_s", 1.9)
+        after = _json.loads((proj / "benchmark.json").read_text())
+        check("writer strips a forbidden speed-claim key on next write",
+              "speedup" not in after, str(sorted(after)))
+
+
+# ===========================================================================
+def test_scenario_engine():
+    section("core/scenario/*  -- P11 what-if engine (definitions, no SUMO)")
+    from core.scenario import registry as R
+    from core.scenario.builder import build_execution
+    from core.scenario.models import SCENARIO_TYPES, TYPE_SPECS, Scenario
+    from core.scenario.validator import validate
+
+    # models round-trip + catalogue completeness
+    s = Scenario(scenario_id="scn-001", name="Test", type="lane_closure",
+                 parameters={"edge_id": "E1", "lane_index": 2}, seeds=[1, 2, 3])
+    check("scenario round-trips through dict",
+          Scenario.from_dict(s.to_dict()).parameters == {"edge_id": "E1", "lane_index": 2})
+    check("every scenario type has a spec",
+          all(t in TYPE_SPECS for t in SCENARIO_TYPES))
+
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        net = d / "network.net.xml"
+        net.write_text(NET)   # E0 (2 lanes), E1 (3 lanes), E9 (1 lane)
+
+        # ---- validator -------------------------------------------------
+        def valid(sc):
+            try:
+                validate(sc, net); return True
+            except ValueError:
+                return False
+
+        check("validator accepts a baseline",
+              valid(Scenario("b", "B", "baseline", seeds=[1])))
+        check("validator accepts a legal lane closure",
+              valid(Scenario("s", "S", "lane_closure",
+                             parameters={"edge_id": "E1", "lane_index": 2}, seeds=[1])))
+        check("validator rejects lane closure on a single-lane edge",
+              not valid(Scenario("s", "S", "lane_closure",
+                                 parameters={"edge_id": "E9", "lane_index": 0}, seeds=[1])))
+        check("validator rejects an out-of-range lane",
+              not valid(Scenario("s", "S", "lane_closure",
+                                 parameters={"edge_id": "E1", "lane_index": 9}, seeds=[1])))
+        check("validator rejects an unknown edge",
+              not valid(Scenario("s", "S", "road_closure",
+                                 parameters={"edge_id": "NOPE"}, seeds=[1])))
+        check("validator accepts a legal road closure",
+              valid(Scenario("s", "S", "road_closure",
+                             parameters={"edge_id": "E1"}, seeds=[1])))
+        check("validator rejects demand multiplier <= 1",
+              not valid(Scenario("s", "S", "traffic_increase",
+                                 parameters={"demand_multiplier": 1.0}, seeds=[1])))
+        check("validator accepts demand multiplier > 1",
+              valid(Scenario("s", "S", "traffic_increase",
+                             parameters={"demand_multiplier": 1.2}, seeds=[1])))
+        check("validator rejects empty seeds",
+              not valid(Scenario("s", "S", "baseline", seeds=[])))
+
+        # ---- builder (closure additionals are pure XML, no SUMO) -------
+        wk = d / "work"
+        base_routes = d / "routes.rou.xml"   # not read for these types
+        base_spec = build_execution(Scenario("b", "B", "baseline", seeds=[1]),
+                                    net_file=net, base_routes=base_routes, work_dir=wk)
+        check("baseline execution modifies nothing",
+              base_spec["scenario_additional"] is None
+              and base_spec["edge_filter"] is None)
+
+        lc = build_execution(
+            Scenario("s", "S", "lane_closure",
+                     parameters={"edge_id": "E1", "lane_index": 2}, seeds=[1]),
+            net_file=net, base_routes=base_routes, work_dir=wk)
+        check("lane-closure execution writes an additional + sets the filter",
+              Path(lc["scenario_additional"]).exists() and lc["edge_filter"] == "E1")
+
+        rc = build_execution(
+            Scenario("s", "S", "road_closure",
+                     parameters={"edge_id": "E1"}, seeds=[1]),
+            net_file=net, base_routes=base_routes, work_dir=wk)
+        check("road-closure execution writes an additional + sets the filter",
+              Path(rc["scenario_additional"]).exists() and rc["edge_filter"] == "E1")
+
+        # ---- registry --------------------------------------------------
+        proj = d / "proj"
+        R.ensure_baseline(proj, [1, 2, 3])
+        check("registry ensures a baseline scenario", R.load(proj, "scn-baseline") is not None)
+        first = R.next_id(proj)
+        check("next_id ignores the named baseline", first == "scn-001", first)
+        R.save(proj, Scenario(first, "One", "road_closure",
+                              parameters={"edge_id": "E1"}, seeds=[1]))
+        check("next_id increments past saved scenarios",
+              R.next_id(proj) == "scn-002")
+        ids = [s.scenario_id for s in R.list_scenarios(proj)]
+        check("list puts baseline first", ids[0] == "scn-baseline", str(ids))
+        R.save_result(proj, first, {"scenario_id": first, "type": "road_closure"})
+        check("result round-trips", R.load_result(proj, first)["type"] == "road_closure")
+        check("a result file is not listed as a scenario definition",
+              "scn-001.result" not in ids)
+
+
+# ===========================================================================
 def main() -> int:
     print("=" * 72)
     print("RoadTwin self-test  (no SUMO, no network required)")
@@ -729,6 +938,8 @@ def main() -> int:
     test_paired()
     test_phase0_gate()
     test_export()
+    test_benchmark()
+    test_scenario_engine()
     print("\n" + "=" * 72)
     print(f"{PASS} passed, {FAIL} failed")
     print("=" * 72)
