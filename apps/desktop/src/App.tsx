@@ -7,6 +7,8 @@ import { listen } from "@tauri-apps/api/event";
 import { LocationGateway } from "./LocationGateway";
 import { ExperimentWorkspace } from "./ExperimentWorkspace";
 import { ValidationQueue } from "./ValidationQueue";
+import { BenchmarkPanel } from "./BenchmarkPanel";
+import { ScenarioWorkspace } from "./ScenarioWorkspace";
 import "./App.css";
 
 declare global {
@@ -206,7 +208,7 @@ function Topbar({ state, tagClass }: { state?: string; tagClass?: string }) {
 
 // ── Main Workspace (tabbed) ───────────────────────────────────────────────────
 
-type WorkspaceTab = "pipeline" | "validation" | "experiment";
+type WorkspaceTab = "pipeline" | "validation" | "experiment" | "acceleration" | "scenarios";
 
 interface WorkspaceProps {
   location: ConfirmedLocation;
@@ -297,6 +299,23 @@ function MainWorkspace({ location, port, twinState, onStateChange, onReset }: Wo
           <span className="tab-icon">⚗</span> Experiment Simulation
           {!pipelineDone && <span className="tab-lock" title="Run pipeline first">🔒</span>}
         </button>
+        <button
+          className={`tab-btn ${activeTab === "acceleration" ? "active" : ""}`}
+          onClick={() => setActiveTab("acceleration")}
+          id="tab-acceleration"
+        >
+          <span className="tab-icon">⚡</span> Acceleration (P10)
+        </button>
+        <button
+          className={`tab-btn ${activeTab === "scenarios" ? "active" : ""}`}
+          onClick={() => setActiveTab("scenarios")}
+          id="tab-scenarios"
+          disabled={!pipelineDone}
+          title={pipelineDone ? undefined : "Run the pipeline first"}
+        >
+          <span className="tab-icon">🔮</span> Scenarios (P11)
+          {!pipelineDone && <span className="tab-lock" title="Run pipeline first">🔒</span>}
+        </button>
       </div>
 
       {/* ── tab content ── */}
@@ -326,6 +345,8 @@ function MainWorkspace({ location, port, twinState, onStateChange, onReset }: Wo
             onComplete={() => onStateChange("COMPLETE")}
           />
         )}
+        {activeTab === "acceleration" && <BenchmarkPanel port={port} />}
+        {activeTab === "scenarios" && pipelineDone && <ScenarioWorkspace />}
       </div>
     </main>
   );
