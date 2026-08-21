@@ -89,6 +89,29 @@ def load_result(project_dir: str | Path, sid: str) -> dict[str, Any] | None:
     return json.loads(p.read_text(encoding="utf-8"))
 
 
+def _interventions_path(project_dir: str | Path, sid: str) -> Path:
+    return _dir(project_dir) / f"{sid}.interventions.json"
+
+
+def save_interventions(project_dir: str | Path, sid: str,
+                       payload: dict[str, Any]) -> Path:
+    """Persist a scenario's candidate definitions + results + ranking (P13).
+
+    Lives beside the scenario's own files (scn-NNN.interventions.json), so it
+    reuses the scenario registry rather than a second store. Failed candidates
+    are part of the payload and are kept, not dropped."""
+    p = _interventions_path(project_dir, sid)
+    p.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return p
+
+
+def load_interventions(project_dir: str | Path, sid: str) -> dict[str, Any] | None:
+    p = _interventions_path(project_dir, sid)
+    if not p.exists():
+        return None
+    return json.loads(p.read_text(encoding="utf-8"))
+
+
 def ensure_baseline(project_dir: str | Path, seeds: list[int]) -> Scenario:
     """Guarantee a baseline scenario exists so the list is never empty."""
     existing = load(project_dir, BASELINE_ID)

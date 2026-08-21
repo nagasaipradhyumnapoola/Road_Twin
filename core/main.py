@@ -515,6 +515,15 @@ class ScenarioCreateRequest(BaseModel):
 _scenario_state: dict = {"status": "idle"}   # idle | running | done | error
 
 
+class InterventionRunRequest(BaseModel):
+    """Optional seed override for an intervention run (P13). None → scenario seeds."""
+    seeds: list[int] | None = None
+
+
+# ── P13 intervention state (in-memory, single-project) ───────────────────────
+_intervention_state: dict = {"status": "idle"}   # idle | running | done | error
+
+
 # ── P6 routes ─────────────────────────────────────────────────────────────────
 
 @app.get("/network/edges")
@@ -854,6 +863,146 @@ def scenario_run(scenario_id: str) -> dict:
     except Exception as exc:
         _scenario_state = {"status": "error", "scenario_id": scenario_id, "detail": str(exc)}
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+# ── P13 intervention engine ──────────────────────────────────────────────────
+def _load_scenario_or_404(scenario_id: str):
+    """Shared: return (proj, scenario, net_file) or raise 404/412."""
+    from core.scenario import registry as R
+
+    proj = _project_dir()
+    scenario = R.load(proj, scenario_id)
+    if not scenario:
+        raise HTTPException(status_code=404, detail=f"Scenario '{scenario_id}' not found.")
+    return proj, scenario, _get_net_file()
+
+
+@app.post("/scenario/{scenario_id}/interventions")
+def interventions_generate(scenario_id: str) -> dict:
+    """Generate + validate candidate interventions (deterministic, no SUMO yet)."""
+    _require_location()
+    from datetime import datetime, timezone
+
+    from core.intervention import candidates as IC, validator as IV
+    from core.scenario import registry as R
+
+    proj, scenario, net_file = _load_scenario_or_404(scenario_id)
+    impact = (R.load_result(proj, scenario_id) or {}).get("impact")
+    cands = IC.generate(scenario, net_file, impact=impact)
+    if not cands:
+        raise HTTPException(
+            status_code=422,
+            detail="Interventions target closure scenarios (lane/road closure); "
+                   "this scenario has nothing to mitigate with the V1 levers.",
+        )
+    for c in cands:
+        try:
+            IV.validate(c, net_file)
+            c.validation_state = "valid"
+        except ValueError as exc:
+            c.validation_state = "invalid"
+            c.failure_reason = str(exc)
+
+    payload = {
+        "scenario_id": scenario_id,
+        "seeds": scenario.seeds,
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "candidates": [c.to_dict() for c in cands],
+        "results": [],
+        "ranking": None,
+    }
+    R.save_interventions(proj, scenario_id, payload)
+    return payload
+
+
+@app.get("/scenario/{scenario_id}/interventions")
+def interventions_get(scenario_id: str) -> dict:
+    """The persisted candidates + results + ranking for a scenario."""
+    _require_location()
+    from core.scenario import registry as R
+
+    payload = R.load_interventions(_project_dir(), scenario_id)
+    if payload is None:
+        raise HTTPException(status_code=404,
+                            detail="No interventions generated yet. POST to generate them.")
+    return payload
+
+
+def _evaluate_and_rank(scenario_id: str, only_id: str | None,
+                       body: InterventionRunRequest | None) -> dict:
+    """Run reference + candidate(s) with real SUMO, rank, persist. Shared by the
+    run-all and run-one endpoints."""
+    global _intervention_state
+    if _intervention_state.get("status") == "running":
+        raise HTTPException(status_code=409, detail="An intervention run is already in progress.")
+
+    _require_location()
+    from core.intervention import evaluator as IE, ranking as IR
+    from core.intervention.models import Candidate
+    from core.scenario import registry as R
+
+    proj, scenario, net_file = _load_scenario_or_404(scenario_id)
+    payload = R.load_interventions(proj, scenario_id)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="Generate interventions first.")
+
+    base_routes = proj / "sumo" / "routes.rou.xml"
+    if not base_routes.exists():
+        raise HTTPException(status_code=412, detail="Routes not generated. POST /demand/generate first.")
+
+    seeds = (body.seeds if body and body.seeds else None) or payload.get("seeds") or scenario.seeds
+    iv_work = proj / "sumo" / "scenarios" / scenario_id / "interventions"
+    cands = [Candidate.from_dict(c) for c in payload["candidates"]]
+    if only_id and not any(c.intervention_id == only_id for c in cands):
+        raise HTTPException(status_code=404, detail=f"Candidate '{only_id}' not found.")
+
+    _intervention_state = {"status": "running", "scenario_id": scenario_id}
+    try:
+        reference = IE.prepare_reference(
+            scenario, net_file=net_file, base_routes=base_routes,
+            work_dir=iv_work, seeds=seeds,
+        )
+        prior = {r["intervention_id"]: r for r in payload.get("results", [])}
+        for c in cands:
+            if only_id and c.intervention_id != only_id:
+                continue
+            prior[c.intervention_id] = IE.evaluate(
+                c, net_file=net_file, base_routes=reference["base_routes"],
+                closure_additional=reference["closure_additional"],
+                closed_edge=reference["closed_edge"], reference=reference,
+                work_dir=iv_work / c.intervention_id, seeds=seeds,
+                project_dir=proj,
+            )
+        # keep candidate order for stable display
+        results = [prior[c.intervention_id] for c in cands if c.intervention_id in prior]
+        payload["results"] = results
+        payload["ranking"] = IR.rank(results)
+        payload["seeds"] = seeds
+        R.save_interventions(proj, scenario_id, payload)
+        _intervention_state = {"status": "done", "scenario_id": scenario_id}
+        return payload
+    except Exception as exc:
+        _intervention_state = {"status": "error", "scenario_id": scenario_id, "detail": str(exc)}
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/scenario/{scenario_id}/interventions/run")
+def interventions_run_all(scenario_id: str, body: InterventionRunRequest | None = None) -> dict:
+    """Evaluate every valid candidate with real SUMO, rank, and persist."""
+    return _evaluate_and_rank(scenario_id, None, body)
+
+
+@app.post("/scenario/{scenario_id}/interventions/{intervention_id}/run")
+def intervention_run_one(scenario_id: str, intervention_id: str,
+                         body: InterventionRunRequest | None = None) -> dict:
+    """Evaluate one candidate with real SUMO, re-rank, and persist."""
+    return _evaluate_and_rank(scenario_id, intervention_id, body)
+
+
+@app.get("/scenario/{scenario_id}/interventions/status")
+def interventions_status() -> dict:
+    """Poll the current intervention run (idle | running | done | error)."""
+    return _intervention_state
 
 
 # ── Vision Endpoints (Phase 7) ────────────────────────────────────────────────

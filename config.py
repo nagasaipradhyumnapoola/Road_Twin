@@ -121,6 +121,19 @@ IMPACT = {
 }
 
 # ---------------------------------------------------------------------------
+# INTERVENTION ENGINE (P13)
+# ---------------------------------------------------------------------------
+# Candidate generation is deterministic and derived from real network/scenario
+# state; these bound the search so a scenario spawns a small, testable set — the
+# engine reports the "best tested option", never an "optimal" one.
+INTERVENTION = {
+    "lane_config_delta": 1,      # candidate adds this many lanes to a bottleneck
+    "lane_config_max": 6,        # never propose more lanes than this on one edge
+    "diversion_upstream_hops": 2,  # how far upstream the diversion rerouter reaches
+    "max_candidates": 4,         # hard cap on candidates per scenario
+}
+
+# ---------------------------------------------------------------------------
 # IMAGERY  (Track A: georeferenced overhead tiles -> real GeoJSON)
 # ---------------------------------------------------------------------------
 # Pick a tile provider whose terms permit your use and set a real User-Agent.

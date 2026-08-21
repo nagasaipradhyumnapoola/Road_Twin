@@ -1039,6 +1039,90 @@ def test_impact():
               and "thresholds" in res["provenance"])
 
 
+def test_intervention():
+    section("core/intervention/*  -- P13 intervention engine (deterministic, no SUMO)")
+    from core.intervention import candidates as IC, ranking as IR, validator as IV
+    from core.intervention.models import (
+        ALT_ROUTING, EVALUATED, FAILED, LANE_CONFIG, Candidate,
+    )
+    from core.scenario.models import Scenario
+
+    with tempfile.TemporaryDirectory() as td:
+        net = Path(td) / "network.net.xml"
+        net.write_text(NET)
+
+        scn = Scenario("scn-001", "LC", "lane_closure",
+                       parameters={"edge_id": "E1", "lane_index": 0}, seeds=[1, 2])
+        c1 = IC.generate(scn, net)
+        c2 = IC.generate(scn, net)
+        sig = lambda cs: [(c.type, c.intervention_id,
+                           c.parameters.get("edge_id") or c.parameters.get("avoid_edge")) for c in cs]
+        check("candidate generation is deterministic", sig(c1) == sig(c2), str(sig(c1)))
+        lane = next((c for c in c1 if c.type == LANE_CONFIG), None)
+        check("lane-config candidate derived from real lane count (E1 3->4)",
+              lane is not None
+              and lane.parameters == {"edge_id": "E1", "from_lanes": 3, "to_lanes": 4},
+              str(lane and lane.parameters))
+        check("candidate is structured + reproducible (id/scenario/type/params)",
+              lane is not None and bool(lane.intervention_id)
+              and lane.scenario_id == "scn-001")
+        check("a diversion candidate is also generated", any(c.type == ALT_ROUTING for c in c1))
+        check("non-closure scenario yields no candidates",
+              IC.generate(Scenario("scn-b", "B", "baseline", seeds=[1]), net) == [])
+
+        def ok(c):
+            try:
+                IV.validate(c, net)
+                return True
+            except ValueError:
+                return False
+
+        check("validator accepts a legal lane config",
+              ok(Candidate("i", "scn-001", LANE_CONFIG, "x", {"edge_id": "E1", "to_lanes": 4})))
+        check("validator rejects an unknown edge",
+              not ok(Candidate("i", "scn-001", LANE_CONFIG, "x", {"edge_id": "NOPE", "to_lanes": 4})))
+        check("validator rejects a no-change lane count",
+              not ok(Candidate("i", "scn-001", LANE_CONFIG, "x", {"edge_id": "E1", "to_lanes": 3})))
+        check("validator rejects to_lanes < 1",
+              not ok(Candidate("i", "scn-001", LANE_CONFIG, "x", {"edge_id": "E1", "to_lanes": 0})))
+        check("validator rejects an unsupported type",
+              not ok(Candidate("i", "scn-001", "teleport", "x", {})))
+        check("validator accepts a legal diversion (avoid edge has downstream)",
+              ok(Candidate("i", "scn-001", ALT_ROUTING, "x",
+                           {"avoid_edge": "E0", "trigger_edges": ["E0"]})))
+        check("validator rejects diversion off a network-exit edge (no downstream)",
+              not ok(Candidate("i", "scn-001", ALT_ROUTING, "x",
+                               {"avoid_edge": "E1", "trigger_edges": ["E0"]})))
+        check("validator rejects diversion with no valid trigger",
+              not ok(Candidate("i", "scn-001", ALT_ROUTING, "x",
+                               {"avoid_edge": "E0", "trigger_edges": ["NOPE"]})))
+
+    def res(iid, tt, q, status=EVALUATED, reason=None):
+        return {"intervention_id": iid, "scenario_id": "scn-001", "type": LANE_CONFIG,
+                "name": iid, "status": status, "failure_reason": reason,
+                "deltas": {"travel_time_s": tt, "travel_time_pct": None,
+                           "queue_m": q, "completed_vehicles": None}}
+
+    results = [res("int-001", -5.0, -10.0), res("int-002", -9.0, -2.0),
+               res("int-003", 2.0, 5.0),
+               {"intervention_id": "int-004", "scenario_id": "scn-001", "type": LANE_CONFIG,
+                "name": "bad", "status": FAILED, "failure_reason": "boom", "deltas": None}]
+    rk = IR.rank(results)
+    check("ranking orders by travel-time improvement (most negative first)",
+          rk["ranked"][:2] == ["int-002", "int-001"], str(rk["ranked"]))
+    check("failed candidate is excluded from ranking (not fabricated)",
+          "int-004" not in rk["ranked"])
+    check("best tested option is the biggest real improvement",
+          rk["best_tested_option"]["intervention_id"] == "int-002" and rk["improves"] is True)
+    check("ranking is deterministic (same results, same order)",
+          IR.rank(results)["ranked"] == rk["ranked"])
+    check("wording is 'best tested option', never 'optimal'",
+          "best tested option" in rk["message"].lower() and "optimal" not in rk["message"].lower())
+    rk2 = IR.rank([res("int-001", 3.0, 1.0)])
+    check("no-improvement case does not claim an improvement",
+          rk2["improves"] is False and "No tested intervention improved" in rk2["message"])
+
+
 # ===========================================================================
 def main() -> int:
     print("=" * 72)
@@ -1056,6 +1140,7 @@ def main() -> int:
     test_benchmark()
     test_scenario_engine()
     test_impact()
+    test_intervention()
     print("\n" + "=" * 72)
     print(f"{PASS} passed, {FAIL} failed")
     print("=" * 72)

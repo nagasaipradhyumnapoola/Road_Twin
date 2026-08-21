@@ -237,6 +237,53 @@ def build_road_closure(
     return desc
 
 
+def build_diversion(
+    net_file: str | Path,
+    out_file: str | Path,
+    *,
+    avoid_edge: str,
+    trigger_edges: list[str],
+    begin: int = 300,
+    end: int = 3600,
+) -> dict:
+    """Write an alternative-routing (diversion) rerouter additional-file.
+
+    Same ADR-006 principle as the closures: a rerouter, never a network edit, so
+    the canonical net is untouched and the delta stays causal. Vehicles crossing
+    any ``trigger_edges`` are rerouted to AVOID ``avoid_edge`` (a soft close via
+    ``closingReroute allow="authority"``). Used by P13 to test "route traffic
+    around the problem earlier / from further out" as an intervention — the
+    trigger set is normally a wider upstream reach than the closure's own.
+    """
+    net_file, out_file = Path(net_file), Path(out_file)
+    edges = read_net_edges(net_file)
+    if avoid_edge not in edges:
+        raise ValueError(f"avoid_edge '{avoid_edge}' is not in the network.")
+    trig = [e for e in trigger_edges if e in edges and not e.startswith(":")]
+    if not trig:
+        raise ValueError("Diversion needs at least one valid trigger edge.")
+
+    root = etree.Element("additional")
+    rr = etree.SubElement(root, "rerouter", id=f"rr_diversion_{avoid_edge}",
+                          edges=" ".join(trig))
+    iv = etree.SubElement(rr, "interval", begin=str(begin), end=str(end))
+    etree.SubElement(iv, "closingReroute", id=avoid_edge, allow="authority")
+
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+    etree.ElementTree(root).write(
+        str(out_file), pretty_print=True, xml_declaration=True, encoding="UTF-8"
+    )
+    desc = {
+        "avoid_edge": avoid_edge,
+        "trigger_edges": trig,
+        "begin": begin,
+        "end": end,
+        "additional_file": str(out_file),
+    }
+    print(f"[scenario] diversion around {avoid_edge} via {len(trig)} trigger edge(s)")
+    return desc
+
+
 def pick_closure_candidate(net_file: str | Path, min_lanes: int = 2, min_length: float = 100.0):
     """Suggest a good edge to close: multi-lane, long, high priority.
 
