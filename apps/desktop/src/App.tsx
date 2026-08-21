@@ -159,10 +159,13 @@ export default function App() {
     return (
       <div className="shell">
         <Topbar state="LOCATING" tagClass="badge-locating" />
-        <LocationGateway onConfirmed={(loc) => {
-          setLocation(loc);
-          setTwinState("IDLE");
-        }} />
+        <LocationGateway
+          port={sidecar.kind === "ready" ? sidecar.port : 8765}
+          onConfirmed={(loc) => {
+            setLocation(loc);
+            setTwinState("IDLE");
+          }}
+        />
       </div>
     );
   }

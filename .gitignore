@@ -34,3 +34,6 @@ projects/*
 # never commit keys
 .env
 *.key
+assets/geocache/
+assets/osm_cache/
+

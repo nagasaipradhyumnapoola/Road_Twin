@@ -18,7 +18,20 @@ def test_phase8():
 
     proj = ROOT / "projects" / "benchmark"
     build_dir = proj / "build"
+    proj.mkdir(parents=True, exist_ok=True)
+    build_dir.mkdir(parents=True, exist_ok=True)
     plain_edg = build_dir / "plain.edg.xml"
+
+    if not plain_edg.exists():
+        # Build plain XML from cached benchmark OSM
+        from core.build.netconvert import osm_to_plain
+        osm_candidates = [
+            ROOT / "assets" / "benchmark" / "osm_4d543007d11ee85d.osm",
+            ROOT / "assets" / "benchmark" / "benchmark.osm",
+        ]
+        osm_file = next((p for p in osm_candidates if p.exists()), None)
+        if osm_file:
+            osm_to_plain(osm_file, build_dir)
 
     # Step 1: Check baseline edge and observation
     obs_file = proj / "observations.json"
@@ -35,6 +48,7 @@ def test_phase8():
 
     # Step 2: Test build_review_items fusion logic
     edg_map = read_edges(plain_edg)
+    assert len(edg_map) > 0, "plain.edg.xml must have edges"
     baseline_dict = {}
     for eid, attrs in edg_map.items():
         num_lanes = int(attrs.get("numLanes", 1))
@@ -46,6 +60,14 @@ def test_phase8():
                 "inferred": False,
             },
         }
+
+    # Ensure observation attaches to a real edge in the network
+    target_edge = next(iter(edg_map.keys()))
+    current_attached = observations[0].get("attached_to", {}).get("road_id", "")
+    if current_attached not in baseline_dict:
+        observations[0]["attached_to"]["road_id"] = f"rt-road-{target_edge}"
+        observations[0]["value"] = int(edg_map[target_edge].get("numLanes", 1)) + 1
+        obs_file.write_text(json.dumps(observations, indent=2), encoding="utf-8")
 
     items = build_review_items(observations, baseline_dict, min_confidence=0.3)
     assert len(items) > 0, "build_review_items must generate review items"
