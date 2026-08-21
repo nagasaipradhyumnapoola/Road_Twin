@@ -820,3 +820,60 @@ body {
   line-height: 1.7;
   margin-bottom: 10px;
 }
+
+/* ── P10 Acceleration benchmark panel ───────────────────────────────── */
+.benchmark-card { max-width: 560px; }
+.bench-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 8px;
+}
+.bench-section-label {
+  margin-top: 22px;
+  margin-bottom: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  color: var(--text-mid);
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 6px;
+}
+.bench-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-family: var(--mono);
+  font-size: 13px;
+}
+.bench-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 8px 10px;
+  border-radius: var(--r-sm);
+}
+.bench-row:nth-child(odd) { background: var(--surface2); }
+.bench-row-label { color: var(--text-mid); }
+.bench-row-val { color: var(--text); font-weight: 600; }
+.bench-row-total {
+  margin-top: 6px;
+  background: var(--accent-lo) !important;
+  border: 1px solid var(--border2);
+}
+.bench-row-total .bench-row-label { color: var(--text); letter-spacing: 1px; }
+.bench-row-total .bench-row-val { color: var(--accent-hi); }
+.bench-row-aside {
+  background: transparent !important;
+  opacity: .75;
+}
+.bench-row-aside .bench-row-label,
+.bench-row-aside .bench-row-val { color: var(--text-dim); font-weight: 400; }
+.bench-footnote {
+  margin-top: 18px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--text-dim);
+}

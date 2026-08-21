@@ -44,6 +44,16 @@ def sumo_home() -> Path:
         guess = Path(exe).resolve().parent.parent
         if (guess / "data").exists():
             return guess
+    # fall back to the pip-installed `eclipse-sumo` package (bundles bin/, data/,
+    # tools/ under the `sumo` module). This makes the venv self-sufficient: no
+    # SUMO_HOME env or system install needed when eclipse-sumo is pip-installed.
+    try:
+        import sumo as _sumo_pkg  # provided by the `eclipse-sumo` wheel
+        pkg = Path(_sumo_pkg.__file__).resolve().parent
+        if (pkg / "data").exists():
+            return pkg
+    except Exception:
+        pass
     raise RuntimeError(
         "SUMO_HOME is not set and netconvert is not on PATH. "
         "Install SUMO (https://sumo.dlr.de/docs/Downloads.php) and set SUMO_HOME, e.g. "
