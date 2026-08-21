@@ -454,6 +454,131 @@ def compare(baseline: dict[str, Any], scenario: dict[str, Any]) -> dict[str, Any
     }
 
 
+# ===========================================================================
+# P12 — per-edge (edgeData) metrics. These live ALONGSIDE the aggregate
+# metrics above; nothing here replaces parse_tripinfo/parse_queue/compare.
+# Every value returned is a raw SUMO number or None — never synthesized.
+# ===========================================================================
+def _fattr(el: Any, key: str) -> float | None:
+    try:
+        return float(el.get(key))
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_edgedata(path: str | Path, *, interval_index: int = -1) -> dict[str, Any]:
+    """Per-edge metrics from a SUMO ``edgeData`` output file.
+
+    SUMO writes one ``<interval>`` per aggregation window; we configure a single
+    window over the whole run, so the default ``interval_index=-1`` returns that
+    one interval. Internal edges (id starts with ':') are skipped. A metric SUMO
+    did not report for an edge is represented as None, never guessed.
+
+    Returns ``{edge_id: {travel_time_s, waiting_time_s, time_loss_s, speed_mps,
+    density, entered, left, sampled_seconds}}``.
+    """
+    intervals: list[dict[str, Any]] = []
+    cur: dict[str, Any] | None = None
+    for event, el in etree.iterparse(str(path), events=("start", "end")):
+        if event == "start" and el.tag == "interval":
+            cur = {}
+        elif event == "end" and el.tag == "edge":
+            eid = el.get("id")
+            if eid and not eid.startswith(":") and cur is not None:
+                cur[eid] = {
+                    "edge_id": eid,
+                    "travel_time_s": _fattr(el, "traveltime"),
+                    "waiting_time_s": _fattr(el, "waitingTime"),
+                    "time_loss_s": _fattr(el, "timeLoss"),
+                    "speed_mps": _fattr(el, "speed"),
+                    "density": _fattr(el, "density"),
+                    "entered": _fattr(el, "entered"),
+                    "left": _fattr(el, "left"),
+                    "sampled_seconds": _fattr(el, "sampledSeconds"),
+                }
+            el.clear()
+        elif event == "end" and el.tag == "interval":
+            intervals.append(cur or {})
+            cur = None
+            el.clear()
+    if not intervals:
+        return {}
+    return intervals[interval_index]
+
+
+def parse_queue_by_edge(path: str | Path) -> dict[str, float]:
+    """Per-edge queue length (m) from ``--queue-output``.
+
+    For each timestep an edge's queue is the maximum of its lanes' queues (the
+    same definition parse_queue() uses network-wide); the reported number is the
+    mean of that over timesteps. ``{edge_id: mean_queue_m}``.
+    """
+    from collections import defaultdict
+
+    per_edge_steps: dict[str, list[float]] = defaultdict(list)
+    cur: dict[str, float] = defaultdict(float)
+    seen: set[str] = set()
+    for event, el in etree.iterparse(str(path), events=("start", "end")):
+        if event == "end" and el.tag == "lane":
+            lid = el.get("id") or ""
+            eid = lid.rsplit("_", 1)[0]
+            if eid and not eid.startswith(":"):
+                try:
+                    cur[eid] = max(cur[eid], float(el.get("queueing_length", 0.0)))
+                    seen.add(eid)
+                except (TypeError, ValueError):
+                    pass
+        elif event == "end" and el.tag == "data":
+            for eid in seen:
+                per_edge_steps[eid].append(cur[eid])
+            cur, seen = defaultdict(float), set()
+            el.clear()
+    return {eid: round(statistics.fmean(v), 2) for eid, v in per_edge_steps.items() if v}
+
+
+def collect_edges(out_dir: str | Path) -> dict[str, Any]:
+    """Merge one run's per-edge edgeData with its per-edge queue. {edge_id: {...}}."""
+    out_dir = Path(out_dir)
+    ed = parse_edgedata(out_dir / "edgedata.xml") if (out_dir / "edgedata.xml").exists() else {}
+    q = parse_queue_by_edge(out_dir / "queue.xml") if (out_dir / "queue.xml").exists() else {}
+    edges: dict[str, Any] = {}
+    for eid in set(ed) | set(q):
+        row = dict(ed.get(eid) or {"edge_id": eid})
+        row["edge_id"] = eid
+        row["queue_length_m"] = q.get(eid)
+        edges[eid] = row
+    return edges
+
+
+_EDGE_METRIC_KEYS = (
+    "travel_time_s", "waiting_time_s", "time_loss_s", "speed_mps",
+    "density", "entered", "left", "queue_length_m",
+)
+
+
+def aggregate_edges(runs: list[dict[str, Any]]) -> dict[str, Any]:
+    """Mean each per-edge metric across seed runs. An edge present in any run is
+    kept; a metric absent in every run for that edge stays None."""
+    from collections import defaultdict
+
+    acc: dict[str, dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
+    for run in runs:
+        for eid, row in run.items():
+            for k in _EDGE_METRIC_KEYS:
+                v = row.get(k)
+                if v is not None:
+                    acc[eid][k].append(v)
+    out: dict[str, Any] = {}
+    for eid, mp in acc.items():
+        d: dict[str, Any] = {"edge_id": eid}
+        for k in _EDGE_METRIC_KEYS:
+            vals = mp.get(k) or []
+            d[k] = round(statistics.fmean(vals), 3) if vals else None
+        d["_n_seeds"] = max((len(mp.get(k) or []) for k in _EDGE_METRIC_KEYS), default=0)
+        out[eid] = d
+    return out
+
+
 def format_table(cmp: dict[str, Any]) -> str:
     """Plain-text comparison table for the notebook and the terminal."""
     w = 22

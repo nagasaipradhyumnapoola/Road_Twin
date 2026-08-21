@@ -50,6 +50,9 @@ def build_execution(
         "scenario_routes": base_routes,
         "scenario_additional": None,
         "edge_filter": None,
+        # Edges the scenario closes outright — the P12 "directly affected" set.
+        # Empty for baseline and traffic-increase (they close nothing).
+        "closed_edges": [],
         "change": {"summary": "No modification — canonical baseline."},
     }
 
@@ -67,7 +70,8 @@ def build_execution(
             f"Lane {p['lane_index']} of {p['edge_id']} closed "
             f"({desc['actual_closed_length_m']} m, t={desc['begin']}–{desc['end']}s)."
         )
-        spec.update(scenario_additional=add, edge_filter=p["edge_id"], change=desc)
+        spec.update(scenario_additional=add, edge_filter=p["edge_id"],
+                    closed_edges=[p["edge_id"]], change=desc)
         return spec
 
     if scenario.type == ROAD_CLOSURE:
@@ -81,7 +85,8 @@ def build_execution(
             f"Edge {p['edge_id']} fully closed "
             f"({desc['actual_closed_length_m']} m, t={desc['begin']}–{desc['end']}s)."
         )
-        spec.update(scenario_additional=add, edge_filter=p["edge_id"], change=desc)
+        spec.update(scenario_additional=add, edge_filter=p["edge_id"],
+                    closed_edges=[p["edge_id"]], change=desc)
         return spec
 
     if scenario.type == TRAFFIC_INCREASE:

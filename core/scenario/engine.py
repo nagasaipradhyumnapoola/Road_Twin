@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from config import SIM
+from core.impact import analysis as impact_analysis
 from core.scenario.builder import build_execution
 from core.scenario.models import BASELINE, Scenario
 from core.scenario.validator import validate
@@ -61,5 +62,19 @@ def execute(
         edge_filter=spec["edge_filter"],
     )
     cmp = M.compare(baseline, scen)
-    result.update(scenario=scen, comparison=cmp, table=M.format_table(cmp))
+
+    # P12 — attribute the aggregate change to specific edges and junctions,
+    # from the real per-edge metrics both arms just produced.
+    impact = impact_analysis.analyze(
+        baseline_edges=baseline.get("edges") or {},
+        scenario_edges=scen.get("edges") or {},
+        net_file=net_file,
+        closed_edges=spec.get("closed_edges") or [],
+        comparison=cmp,
+        scenario_id=scenario.scenario_id,
+        seeds=seeds,
+    )
+
+    result.update(scenario=scen, comparison=cmp, table=M.format_table(cmp),
+                  impact=impact)
     return result

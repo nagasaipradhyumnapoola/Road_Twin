@@ -844,6 +844,11 @@ def test_scenario_engine():
           Scenario.from_dict(s.to_dict()).parameters == {"edge_id": "E1", "lane_index": 2})
     check("every scenario type has a spec",
           all(t in TYPE_SPECS for t in SCENARIO_TYPES))
+    check("scenario records a demand basis (canonical = 1.0)",
+          Scenario("b", "B", "baseline", seeds=[1]).demand.get("multiplier") == 1.0)
+    check("traffic increase records its multiplier as demand",
+          Scenario("s", "S", "traffic_increase",
+                   parameters={"demand_multiplier": 1.5}, seeds=[1]).demand.get("multiplier") == 1.5)
 
     with tempfile.TemporaryDirectory() as td:
         d = Path(td)
@@ -924,6 +929,116 @@ def test_scenario_engine():
               "scn-001.result" not in ids)
 
 
+def test_impact():
+    section("core/impact/*  -- P12 impact attribution (deterministic, no SUMO)")
+    from core.sim import metrics as M
+    from core.impact import analysis as IA
+    from core.impact.models import (
+        ATTR_UNCHANGED, DIRECTLY_AFFECTED, SECONDARILY_AFFECTED, SEVERE,
+    )
+
+    EDGEDATA = """<?xml version="1.0"?>
+<meandata>
+ <interval begin="0" end="3600" id="ed">
+  <edge id="E0" sampledSeconds="500" traveltime="30.0" waitingTime="2.0" timeLoss="5.0" speed="10.0" density="8.0" entered="100" left="98"/>
+  <edge id="E1" sampledSeconds="800" traveltime="60.0" waitingTime="40.0" timeLoss="30.0" speed="4.0" density="30.0" entered="90" left="70"/>
+  <edge id=":n2_0" traveltime="1.0" speed="5.0" entered="10"/>
+ </interval>
+</meandata>"""
+
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / "edgedata.xml").write_text(EDGEDATA)
+        ed = M.parse_edgedata(d / "edgedata.xml")
+        check("edgeData: real per-edge travel time parsed", ed["E1"]["travel_time_s"] == 60.0)
+        check("edgeData: waiting time parsed", ed["E1"]["waiting_time_s"] == 40.0)
+        check("edgeData: speed parsed", ed["E0"]["speed_mps"] == 10.0)
+        check("edgeData: entered/left counts parsed",
+              ed["E0"]["entered"] == 100.0 and ed["E1"]["left"] == 70.0)
+        check("edgeData: internal (:) edges skipped", ":n2_0" not in ed)
+
+        (d / "queue.xml").write_text(QUEUE)   # E1 max 20 then 40 -> 30 ; E2 99 then 1 -> 50
+        q = M.parse_queue_by_edge(d / "queue.xml")
+        check("queue-by-edge: mean of per-step max lane queue", q["E1"] == 30.0, str(q))
+        check("queue-by-edge: separates edges", q["E2"] == 50.0, str(q))
+
+        edges_run = M.collect_edges(d)
+        check("collect_edges merges edgeData + queue",
+              edges_run["E1"]["queue_length_m"] == 30.0 and edges_run["E1"]["travel_time_s"] == 60.0)
+
+        r2 = {k: dict(v) for k, v in edges_run.items()}
+        r2["E1"]["travel_time_s"] = 80.0
+        agg = M.aggregate_edges([edges_run, r2])
+        check("aggregate_edges means across seeds", agg["E1"]["travel_time_s"] == 70.0)
+
+    # ---- classification, attribution, junctions, summary ----
+    base = {
+        "E0": {"edge_id": "E0", "travel_time_s": 30.0, "queue_length_m": 2.0,
+               "speed_mps": 10.0, "waiting_time_s": 2.0, "entered": 100.0},
+        "E1": {"edge_id": "E1", "travel_time_s": 40.0, "queue_length_m": 5.0,
+               "speed_mps": 10.0, "waiting_time_s": 5.0, "entered": 90.0},
+        "E9": {"edge_id": "E9", "travel_time_s": 10.0, "queue_length_m": 0.0,
+               "speed_mps": 8.0, "waiting_time_s": 0.0, "entered": 50.0},
+    }
+    scen = {
+        "E0": {"edge_id": "E0", "travel_time_s": 33.0, "queue_length_m": 2.0,
+               "speed_mps": 9.0, "waiting_time_s": 3.0, "entered": 100.0},
+        "E1": {"edge_id": "E1", "travel_time_s": 80.0, "queue_length_m": 60.0,
+               "speed_mps": 4.0, "waiting_time_s": 45.0, "entered": 95.0},
+        "E9": {"edge_id": "E9", "travel_time_s": 10.0, "queue_length_m": 0.0,
+               "speed_mps": 8.0, "waiting_time_s": 0.0, "entered": 50.0},
+    }
+    with tempfile.TemporaryDirectory() as td:
+        net = Path(td) / "network.net.xml"
+        net.write_text(NET)
+        cmp = {"rows": [{"metric": "Average travel time", "delta_pct": 33.3},
+                        {"metric": "Queue length", "delta_pct": 50.0}]}
+        res = IA.analyze(baseline_edges=base, scenario_edges=scen, net_file=net,
+                         closed_edges=["E0"], comparison=cmp,
+                         scenario_id="scn-test", seeds=[1, 2])
+        by = {e["edge_id"]: e for e in res["edges"]}
+
+        check("attribution: closed edge is DIRECTLY_AFFECTED",
+              by["E0"]["attribution"] == DIRECTLY_AFFECTED)
+        check("attribution: materially worse edge is SECONDARILY_AFFECTED",
+              by["E1"]["attribution"] == SECONDARILY_AFFECTED)
+        check("attribution: untouched edge is UNCHANGED",
+              by["E9"]["attribution"] == ATTR_UNCHANGED)
+        check("class: worst edge is SEVERE", by["E1"]["impact_class"] == SEVERE,
+              by["E1"]["impact_class"])
+        check("delta: travel-time delta is scenario - baseline",
+              by["E1"]["travel_time_delta_s"] == 40.0)
+        check("delta: queue delta", by["E1"]["queue_delta_m"] == 55.0)
+        check("delta: speed delta negative (slower)", by["E1"]["speed_delta_mps"] == -6.0)
+        check("delta: travel-time percent", by["E1"]["travel_time_delta_pct"] == 100.0)
+
+        res2 = IA.analyze(baseline_edges=base, scenario_edges=scen, net_file=net,
+                          closed_edges=["E0"], comparison=None,
+                          scenario_id="scn-test", seeds=[1, 2])
+        by2 = {e["edge_id"]: e for e in res2["edges"]}
+        check("classification is deterministic (same input, same class)",
+              by2["E1"]["impact_class"] == by["E1"]["impact_class"])
+
+        jids = [j["junction_id"] for j in res["critical_junctions"]]
+        check("critical junction identified from real deltas", "n1" in jids, str(jids))
+        check("junction score built from queue + waiting increase",
+              res["critical_junctions"][0]["impact_score"] > 0)
+        check("unaffected junction (n8/n9 on E9) does not rank",
+              "n8" not in jids and "n9" not in jids)
+
+        s = res["summary"]
+        check("summary: affected_roads = direct + secondary", s["affected_roads"] == 2, str(s))
+        check("summary: directly_affected counted", s["directly_affected"] == 1)
+        check("summary: travel-time pct traces to network comparison",
+              s["travel_time_delta_pct"] == 33.3)
+        check("summary: edges_measured equals edges analysed",
+              s["edges_measured"] == len(res["edges"]))
+        check("provenance: seeds + real metric source + thresholds recorded",
+              res["provenance"]["seeds"] == [1, 2]
+              and "edgeData" in res["provenance"]["metric_source"]
+              and "thresholds" in res["provenance"])
+
+
 # ===========================================================================
 def main() -> int:
     print("=" * 72)
@@ -940,6 +1055,7 @@ def main() -> int:
     test_export()
     test_benchmark()
     test_scenario_engine()
+    test_impact()
     print("\n" + "=" * 72)
     print(f"{PASS} passed, {FAIL} failed")
     print("=" * 72)

@@ -9,8 +9,30 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from lxml import etree
+
 from core.build.netconvert import sumo_bin
 from core.sim import metrics as M
+
+
+def _write_edgedata_additional(add_path: Path, out_path: Path,
+                               begin: int, end: int) -> None:
+    """Write a SUMO additional that tells SUMO to emit per-edge metrics.
+
+    One aggregation interval over the whole run, so the output has a single
+    per-edge row. ``excludeEmpty`` drops edges no vehicle used (their metrics
+    would be degenerate); the impact analysis treats a missing edge as
+    unchanged rather than inventing a value. The output path is absolute so it
+    lands in out_dir regardless of SUMO's working directory.
+    """
+    root = etree.Element("additional")
+    etree.SubElement(
+        root, "edgeData", id="ed", file=str(out_path.resolve()),
+        begin=str(begin), end=str(end), excludeEmpty="true",
+    )
+    etree.ElementTree(root).write(
+        str(add_path), pretty_print=True, xml_declaration=True, encoding="UTF-8"
+    )
 
 
 def run_once(
@@ -23,8 +45,15 @@ def run_once(
     end: int = 3600,
     additional: str | Path | None = None,
     step_length: float = 1.0,
+    edgedata: bool = True,
 ) -> Path:
-    """One SUMO run. Writes tripinfo/queue/summary into out_dir."""
+    """One SUMO run. Writes tripinfo/queue/summary into out_dir.
+
+    When ``edgedata`` is set (default), also emits per-edge metrics
+    (edgedata.xml) via an extra additional-file — real SUMO output used by the
+    P12 impact analysis. It is measurement-only and does not change the
+    simulation, so baseline vs scenario stays a controlled comparison.
+    """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -48,8 +77,18 @@ def run_once(
         "--time-to-teleport", "300",
         "--ignore-route-errors", "true",
     ]
+
+    # Additional-files: the per-edge collector (optional) plus the scenario's
+    # closure additional (optional). SUMO takes them as one comma-separated list.
+    adds: list[str] = []
+    if edgedata:
+        ed_add = out_dir / "edgedata.add.xml"
+        _write_edgedata_additional(ed_add, out_dir / "edgedata.xml", begin, end)
+        adds.append(str(ed_add))
     if additional:
-        cmd += ["-a", str(additional)]
+        adds.append(str(additional))
+    if adds:
+        cmd += ["-a", ",".join(adds)]
 
     tag = "closure" if additional else "baseline"
     print(f"[sumo] {tag} seed={seed}")
@@ -73,19 +112,31 @@ def run_scenario(
     additional: str | Path | None = None,
     label: str = "baseline",
     edge_filter: str | None = None,
+    collect_edges: bool = True,
 ) -> dict[str, Any]:
-    """Run one scenario across every seed and aggregate."""
+    """Run one scenario across every seed and aggregate.
+
+    With ``collect_edges`` (default) the aggregate also carries per-edge means
+    across seeds under ``agg["edges"]`` — the raw material the P12 impact
+    analysis compares baseline against scenario. It is additive: the existing
+    network-level keys are unchanged.
+    """
     work_dir = Path(work_dir)
     runs = []
+    edge_runs: list[dict[str, Any]] = []
     for s in seeds:
         d = work_dir / label / f"seed_{s}"
         run_once(net_file, routes_file, d, seed=s, begin=begin, end=end,
-                 additional=additional)
+                 additional=additional, edgedata=collect_edges)
         runs.append(M.collect_run(d, edge_filter=edge_filter))
+        if collect_edges:
+            edge_runs.append(M.collect_edges(d))
     # Pass seeds so the per-seed values survive aggregation -- compare() pairs
     # baseline and closure by seed, and cannot do that from means alone.
     agg = M.aggregate(runs, seeds=seeds)
     agg["label"] = label
+    if collect_edges and edge_runs:
+        agg["edges"] = M.aggregate_edges(edge_runs)
     warnings = [r["_warning"] for r in runs if r.get("_warning")]
     if warnings:
         agg["warnings"] = warnings[:3]

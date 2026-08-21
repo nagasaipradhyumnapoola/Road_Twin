@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { ResultTable } from "./ExperimentWorkspace";
+import { ImpactMap, ImpactSummary } from "./ImpactMap";
 
 const API = () =>
   `http://127.0.0.1:${(window as unknown as { __rtPort?: number }).__rtPort ?? 8765}`;
@@ -349,6 +350,13 @@ export function ScenarioWorkspace() {
               </button>
             </div>
 
+            {activeResult?.impact && (
+              <div style={{ marginBottom: 24 }}>
+                <h3 className="exp-section-title" style={{ marginTop: 0 }}>Impact Map</h3>
+                <ImpactSummary impact={activeResult.impact} />
+                <ImpactMap impact={activeResult.impact} />
+              </div>
+            )}
             {activeResult?.comparison && (
               <ResultTable
                 comparison={activeResult.comparison}

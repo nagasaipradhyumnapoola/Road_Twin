@@ -68,6 +68,20 @@ TYPE_SPECS: dict[str, dict[str, Any]] = {
 }
 
 
+def demand_for(scenario_type: str, parameters: dict[str, Any]) -> dict[str, Any]:
+    """The demand a scenario imposes, normalized. 1.0 = canonical (unchanged)
+    demand; only a traffic increase raises it. Stored on the scenario so a
+    definition records its own demand basis and stays reproducible without
+    re-deriving from parameters."""
+    multiplier = 1.0
+    if scenario_type == TRAFFIC_INCREASE:
+        try:
+            multiplier = float((parameters or {}).get("demand_multiplier", 1.0))
+        except (TypeError, ValueError):
+            multiplier = 1.0
+    return {"multiplier": multiplier, "source": "canonical_routes"}
+
+
 @dataclass
 class Scenario:
     """A reproducible what-if branch off the canonical twin."""
@@ -77,10 +91,18 @@ class Scenario:
     type: str
     base_twin_id: str = "roadtwin-active"
     parameters: dict[str, Any] = field(default_factory=dict)
+    demand: dict[str, Any] = field(default_factory=dict)
     seeds: list[int] = field(default_factory=list)
     created_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat(timespec="seconds")
     )
+
+    def __post_init__(self) -> None:
+        # Derive demand once from type + parameters when not already given, so
+        # every scenario (however constructed, and old files loaded without it)
+        # carries a demand basis.
+        if not self.demand:
+            self.demand = demand_for(self.type, self.parameters)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

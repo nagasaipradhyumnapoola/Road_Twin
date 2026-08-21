@@ -787,6 +787,29 @@ def scenario_get(scenario_id: str) -> dict:
     return {"scenario": s.to_dict(), "result": R.load_result(proj, scenario_id)}
 
 
+@app.get("/scenario/{scenario_id}/impact")
+def scenario_impact(scenario_id: str) -> dict:
+    """P12 — the per-edge impact attribution for a scenario's last run.
+
+    Reads the impact block persisted inside the scenario result (no simulation
+    here). 404 if the scenario has not been run, 409 if it was run before P12
+    (no impact block) — tell the caller to re-run.
+    """
+    _require_location()
+    from core.scenario import registry as R
+
+    proj = _project_dir()
+    result = R.load_result(proj, scenario_id)
+    if result is None:
+        raise HTTPException(status_code=404,
+                            detail=f"Scenario '{scenario_id}' has no result yet. Run it first.")
+    impact = result.get("impact")
+    if impact is None:
+        raise HTTPException(status_code=409,
+                            detail="This result predates impact analysis. Re-run the scenario.")
+    return impact
+
+
 @app.post("/scenario/{scenario_id}/run")
 def scenario_run(scenario_id: str) -> dict:
     """Run a scenario end-to-end (baseline + scenario arms) and store the result.

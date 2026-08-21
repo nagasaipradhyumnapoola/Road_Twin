@@ -94,6 +94,33 @@ CLOSURE = {
 }
 
 # ---------------------------------------------------------------------------
+# IMPACT ATTRIBUTION (P12)
+# ---------------------------------------------------------------------------
+# Deterministic, reproducible thresholds for turning per-edge baseline-vs-
+# scenario deltas into an impact class and an attribution. NOTHING here is
+# hardcoded in the UI or the analysis code — change a number, re-run, get a
+# different (still deterministic) classification. All inputs are real SUMO
+# edgeData/queue values; no metric is synthesized.
+IMPACT = {
+    # MATERIALITY — an edge is "affected" (not UNCHANGED) only when its scenario
+    # change clears one of these floors. Travel time is judged as a percentage
+    # of the edge's own baseline; queue as an absolute increase in metres.
+    "material_travel_time_pct": 10.0,   # |Δ edge travel time| ≥ 10 %
+    "material_queue_delta_m": 5.0,      # OR queue grows ≥ 5 m
+
+    # SEVERITY BANDS — class is the worse of the travel-time and queue bands.
+    # Read [a, b, c] as:  LOW: worsening < a · MODERATE: a ≤ w < b ·
+    # HIGH: b ≤ w < c · SEVERE: w ≥ c.  Only worsening (positive) counts.
+    "travel_time_pct_bands": [10.0, 25.0, 50.0],
+    "queue_delta_m_bands": [5.0, 15.0, 40.0],
+
+    # CRITICAL JUNCTIONS — rank incident-edge worsening; keep the top N that
+    # clear a minimum positive score (metres of queue + seconds of waiting).
+    "junction_top_n": 5,
+    "junction_min_score": 0.1,
+}
+
+# ---------------------------------------------------------------------------
 # IMAGERY  (Track A: georeferenced overhead tiles -> real GeoJSON)
 # ---------------------------------------------------------------------------
 # Pick a tile provider whose terms permit your use and set a real User-Agent.
