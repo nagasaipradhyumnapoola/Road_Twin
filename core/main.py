@@ -524,6 +524,19 @@ class InterventionRunRequest(BaseModel):
 _intervention_state: dict = {"status": "idle"}   # idle | running | done | error
 
 
+class GoalRequest(BaseModel):
+    """An engineering goal against a scenario's tested options (P14).
+
+    `objective` is one of core.decision.models.OBJECTIVES (see
+    GET /decision/objectives). `target_pct` is the required improvement as a
+    positive percentage. `seeds` overrides the seed set for any interventions
+    that still need to be run; None → the scenario's seeds."""
+    objective: str
+    target_pct: float = Field(gt=0.0, le=100.0, allow_inf_nan=False)
+    max_interventions: int = Field(default=1, ge=1, le=8)
+    seeds: list[int] | None = None
+
+
 # ── P6 routes ─────────────────────────────────────────────────────────────────
 
 @app.get("/network/edges")
@@ -1003,6 +1016,113 @@ def intervention_run_one(scenario_id: str, intervention_id: str,
 def interventions_status() -> dict:
     """Poll the current intervention run (idle | running | done | error)."""
     return _intervention_state
+
+
+# ── P14 engineer goal -> decision ────────────────────────────────────────────
+@app.get("/decision/objectives")
+def decision_objectives() -> dict:
+    """The measurable objectives + defaults that drive the goal form (P14)."""
+    from config import DECISION
+    from core.decision.models import OBJECTIVE_SPECS
+
+    return {
+        "objectives": [{"objective": k, **v} for k, v in OBJECTIVE_SPECS.items()],
+        "default_target_pct": DECISION["default_target_pct"],
+        "default_max_interventions": DECISION["default_max_interventions"],
+        "supported_max_interventions": DECISION["supported_max_interventions"],
+    }
+
+
+def _ensure_tested_interventions(scenario_id: str,
+                                 seeds: list[int] | None) -> dict:
+    """Return the intervention payload with real results, running P13 if needed.
+
+    Generates candidates and runs them with real SUMO only when they are not
+    already tested — so the goal search always measures real numbers, never
+    fabricated ones. Raises the same 422 as P13 when a scenario has nothing to
+    mitigate with the V1 levers."""
+    from core.intervention.models import EVALUATED
+    from core.scenario import registry as R
+
+    proj = _project_dir()
+    payload = R.load_interventions(proj, scenario_id)
+    if payload is None:
+        payload = interventions_generate(scenario_id)   # may raise 422
+    has_results = any(r.get("status") == EVALUATED for r in (payload.get("results") or []))
+    if not has_results:
+        body = InterventionRunRequest(seeds=seeds) if seeds else None
+        payload = _evaluate_and_rank(scenario_id, None, body)
+    return payload
+
+
+@app.post("/scenario/{scenario_id}/goal")
+def scenario_goal(scenario_id: str, body: GoalRequest) -> dict:
+    """Find the best tested option that meets an engineering goal (P14).
+
+    Reuses the P13 tested candidates (running them with real SUMO first if they
+    have not been tested yet), measures each against the goal, and assembles the
+    decision card. Never forces a recommendation: reports an honest 'not
+    achieved' with the best result actually reached when nothing clears target."""
+    _require_location()
+    from core.decision import card as DC, goal as DG
+    from core.decision.models import OBJECTIVES, Goal
+    from core.scenario import registry as R
+
+    proj, scenario, _ = _load_scenario_or_404(scenario_id)
+    if body.objective not in OBJECTIVES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown objective '{body.objective}'. One of: {', '.join(OBJECTIVES)}.",
+        )
+
+    payload = _ensure_tested_interventions(scenario_id, body.seeds)
+
+    goal = Goal(objective=body.objective, target_pct=body.target_pct,
+                max_interventions=body.max_interventions)
+    goal_result = DG.search(payload, goal)
+
+    impact = (R.load_result(proj, scenario_id) or {}).get("impact")
+    seeds = payload.get("seeds") or scenario.seeds
+    decision_card = DC.build(
+        scenario=scenario, location=_read_location(), impact=impact,
+        goal_result=goal_result, seeds=seeds,
+    )
+    R.save_decision(proj, scenario_id, decision_card)
+    return {"ok": True, "goal_result": goal_result, "decision_card": decision_card}
+
+
+@app.get("/scenario/{scenario_id}/decision")
+def scenario_decision(scenario_id: str) -> dict:
+    """The last persisted decision card for a scenario (P14)."""
+    _require_location()
+    from core.scenario import registry as R
+
+    card = R.load_decision(_project_dir(), scenario_id)
+    if card is None:
+        raise HTTPException(status_code=404,
+                            detail="No decision yet. POST a goal to /scenario/{id}/goal first.")
+    return card
+
+
+@app.post("/scenario/{scenario_id}/decision/export")
+def scenario_decision_export(scenario_id: str) -> dict:
+    """Write the decision report (DECISION.md + decision.json) and package a ZIP."""
+    _require_location()
+    from core.export import package as EX
+    from core.scenario import registry as R
+
+    proj = _project_dir()
+    card = R.load_decision(proj, scenario_id)
+    if card is None:
+        raise HTTPException(status_code=404,
+                            detail="No decision to export. POST a goal first.")
+    try:
+        report = EX.write_decision_report(proj, card)
+        zip_path = EX.export_project(proj, proj.parent / "RoadTwin_Decision_export.zip")
+        return {"ok": True, "report": str(report), "zip_path": str(zip_path),
+                "size_kb": round(zip_path.stat().st_size / 1024, 1)}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 # ── Vision Endpoints (Phase 7) ────────────────────────────────────────────────
