@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { ResultTable } from "./ExperimentWorkspace";
 import { ImpactMap, ImpactSummary } from "./ImpactMap";
 import { InterventionPanel } from "./InterventionPanel";
+import { DecisionPanel } from "./DecisionPanel";
 
 const API = () =>
   `http://127.0.0.1:${(window as unknown as { __rtPort?: number }).__rtPort ?? 8765}`;
@@ -367,11 +368,18 @@ export function ScenarioWorkspace() {
               <div className="exp-hint">Baseline scenario run successfully. No comparison (it is the baseline).</div>
             )}
             {selectedItem.scenario.scenario_id !== "scn-baseline" && (
-              <InterventionPanel
-                scenarioId={selectedItem.scenario.scenario_id}
-                scenarioType={selectedItem.scenario.type}
-                hasResult={selectedItem.has_result}
-              />
+              <>
+                <InterventionPanel
+                  scenarioId={selectedItem.scenario.scenario_id}
+                  scenarioType={selectedItem.scenario.type}
+                  hasResult={selectedItem.has_result}
+                />
+                <DecisionPanel
+                  scenarioId={selectedItem.scenario.scenario_id}
+                  scenarioType={selectedItem.scenario.type}
+                  hasResult={selectedItem.has_result}
+                />
+              </>
             )}
             {!activeResult && !running && selectedItem.has_result && (
               <div className="exp-hint">Loading result...</div>
