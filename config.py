@@ -134,6 +134,22 @@ INTERVENTION = {
 }
 
 # ---------------------------------------------------------------------------
+# ENGINEER GOAL -> DECISION (P14)
+# ---------------------------------------------------------------------------
+# The goal search reuses the P13 tested candidates; it never runs a second
+# search space. It only measures each already-tested option against the
+# engineer's goal and reports whether the target was met — "best tested option",
+# never "optimal", and an honest "not achieved" when nothing clears the target.
+DECISION = {
+    "default_target_pct": 20.0,   # improvement the goal form starts on
+    "default_max_interventions": 1,  # V1 tests single-lever options only
+    # V1 candidates are single interventions, so a max above this is recorded
+    # but cannot be satisfied by a combination (none are tested). Kept explicit
+    # so the limitation is visible rather than silently ignored.
+    "supported_max_interventions": 1,
+}
+
+# ---------------------------------------------------------------------------
 # IMAGERY  (Track A: georeferenced overhead tiles -> real GeoJSON)
 # ---------------------------------------------------------------------------
 # Pick a tile provider whose terms permit your use and set a real User-Agent.
