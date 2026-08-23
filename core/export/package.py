@@ -97,6 +97,69 @@ def write_readme(project_dir: str | Path, *, location: dict, results_table: str,
     return p
 
 
+def _fmt_pct(v: Any) -> str:
+    return f"{v:+.1f}%" if isinstance(v, (int, float)) else "n/a"
+
+
+def write_decision_report(project_dir: str | Path, card: dict[str, Any]) -> Path:
+    """Write the P14 decision card as DECISION.md (+ decision.json) for export.
+
+    A flat, self-describing summary of numbers established elsewhere — nothing
+    is recomputed here. Both a machine copy (decision.json) and a human copy
+    (DECISION.md) go into the project so the ZIP carries the decision itself."""
+    proj = Path(project_dir)
+    (proj / "decision.json").write_text(json.dumps(card, indent=2), encoding="utf-8")
+
+    loc = card.get("location", {})
+    scn = card.get("scenario", {})
+    imp = card.get("impact", {})
+    best = card.get("best_tested_option")
+    sim = card.get("simulation", {})
+
+    lines = [
+        "# RoadTwin Decision", "",
+        f"Generated: {card.get('generated_at', '?')}", "",
+        "## Location",
+        loc.get("name", "unnamed")
+        + (f" / Junction {loc['critical_junction']}" if loc.get("critical_junction") else ""),
+        "", "## Scenario",
+        f"{scn.get('name', '?')}  ({scn.get('type', '?')})",
+        "", "## Impact",
+        f"- Travel time: {_fmt_pct(imp.get('travel_time_pct'))}",
+        f"- Queue: {_fmt_pct(imp.get('queue_pct'))}",
+        f"- Affected roads: {imp.get('affected_roads', 'n/a')}",
+        f"- Critical junctions: {imp.get('critical_junctions', 'n/a')}",
+        "", "## Engineering goal",
+        f"- Objective: {card.get('objective_label', '?')}",
+        f"- Target: {_fmt_pct((card.get('goal') or {}).get('target_pct'))}",
+        f"- Result: {'ACHIEVED' if card.get('achieved') else 'NOT ACHIEVED'}",
+        f"- {card.get('message', '')}",
+        "", "## Best tested option",
+    ]
+    if best:
+        res = best.get("result", {})
+        lines += [
+            best.get("name", "?"),
+            f"- Travel time: {_fmt_pct(res.get('travel_time_pct'))}",
+            f"- Queue: {_fmt_pct(res.get('queue_pct'))}",
+            f"- Completed vehicles: {_fmt_pct(res.get('completed_pct'))}",
+        ]
+    else:
+        lines.append("None — no tested option satisfied the goal.")
+    lines += [
+        "", "## Simulation",
+        f"{sim.get('seeds', 0)} seeds: {sim.get('seed_values', [])}",
+        "", "## Assumptions",
+        *[f"- {a}" for a in card.get("assumptions", [])],
+        "", "## Limitations",
+        *[f"- {l}" for l in card.get("limitations", [])],
+        "", f"_{card.get('note', '')}_", "",
+    ]
+    p = proj / "DECISION.md"
+    p.write_text("\n".join(lines), encoding="utf-8")
+    return p
+
+
 def export_project(project_dir: str | Path, zip_path: str | Path) -> Path:
     """Zip the project folder. Skips scratch and per-seed raw output."""
     project_dir = Path(project_dir)
